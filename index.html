@@ -1321,7 +1321,7 @@ function App() {
   }, [data]);
 
     const save = useCallback(async (d) => {
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(d)); } catch {}
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(d)); } catch (_) {}
   }, []);
 
   const setDataAndSave = (fn) => {
