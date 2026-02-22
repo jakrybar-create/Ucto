@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Podvojné účtovníctvo — COFIM</title>
+  <title>Podvojne uctovnictvo - COFIM</title>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
@@ -608,130 +608,152 @@ function PreviewTable({ entries, selected, onToggle, onToggleAll }) {
 
 // ── OCR Doklad Modal ─────────────────────────────────────────────────────────
 function OcrModal({ onClose, onConfirm, inp, btn, year }) {
-  const [stage, setStage] = useState("capture"); // capture | processing | review
-  const [imgB64, setImgB64] = useState(null);
+  const [stage, setStage] = useState("capture");
   const [imgPreview, setImgPreview] = useState(null);
+  const [pdfName, setPdfName] = useState(null);
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
   const [form, setForm] = useState({ date: "", description: "", debitAcc: "", creditAcc: "", amount: "" });
-  const fileRef = useRef(null);
+  const imgRef = useRef(null);
+  const pdfRef = useRef(null);
 
-  const ACCOUNTS_LIST = ACCOUNT_CHART.map(a => `${a.code} – ${a.name}`).join("\n");
+  const ACCOUNTS_LIST = ACCOUNT_CHART.map(a => a.code + " - " + a.name).join("\n");
 
-  const handleFile = (file) => {
+  const SYSTEM_PROMPT = "Si uctovny asistent pre slovenske podvojne uctovnictvo.\n" +
+    "Z dokladu (faktura, pokladnicny doklad, vypis) extrahuj uctovny zapis.\n" +
+    "Dostupne ucty:\n" + ACCOUNTS_LIST + "\n\n" +
+    "Odpovedz VYLUCNE JSON objektom (bez markdown, bez textu navyse):\n" +
+    '{"date":"YYYY-MM-DD","description":"strucny popis a cislo dokladu","debitAcc":"XXX","creditAcc":"XXX","amount":0.00,"confidence":"high|medium|low","notes":"vysvetlenie"}';
+
+  const parseResult = (text) => {
+    const clean = text.replace(/```json|```/g, "").trim();
+    const parsed = JSON.parse(clean);
+    setResult(parsed);
+    setForm({
+      date: parsed.date || new Date().toISOString().slice(0, 10),
+      description: parsed.description || "",
+      debitAcc: parsed.debitAcc || "",
+      creditAcc: parsed.creditAcc || "",
+      amount: parsed.amount ? String(parsed.amount) : "",
+    });
+    setStage("review");
+  };
+
+  const callClaude = async (messages) => {
+    const res = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 1000, system: SYSTEM_PROMPT, messages })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error?.message || "API chyba");
+    return data.content?.map(b => b.text || "").join("") || "";
+  };
+
+  const handleImageFile = (file) => {
     if (!file) return;
     const reader = new FileReader();
-    reader.onload = (e) => {
+    reader.onload = async (e) => {
       const dataUrl = e.target.result;
       const b64 = dataUrl.split(",")[1];
-      setImgB64(b64);
+      const mtype = file.type || "image/jpeg";
       setImgPreview(dataUrl);
+      setPdfName(null);
       setStage("processing");
-      processImage(b64);
+      setError("");
+      try {
+        const text = await callClaude([{ role: "user", content: [
+          { type: "image", source: { type: "base64", media_type: mtype, data: b64 } },
+          { type: "text", text: "Aktualny rok: " + year + ". Extrahuj uctovny zapis z tohto dokladu." }
+        ]}]);
+        parseResult(text);
+      } catch (e) {
+        setError("Chyba OCR: " + e.message);
+        setStage("capture");
+      }
     };
     reader.readAsDataURL(file);
   };
 
-  const processImage = async (b64) => {
+  const handlePdfFile = async (file) => {
+    if (!file) return;
+    setPdfName(file.name);
+    setImgPreview(null);
+    setStage("processing");
     setError("");
     try {
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
-          max_tokens: 1000,
-          system: `Si účtovný asistent pre slovenské podvojné účtovníctvo. 
-Z odfoteného dokladu (faktúra, pokladničný doklad, výpis) extrahuj účtovný zápis.
-Dostupné účty:
-${ACCOUNTS_LIST}
-
-Odpovedz VÝLUČNE JSON objektom (bez markdown, bez textu navyše):
-{
-  "date": "YYYY-MM-DD",
-  "description": "stručný popis",
-  "debitAcc": "XXX",
-  "creditAcc": "XXX", 
-  "amount": 0.00,
-  "confidence": "high|medium|low",
-  "notes": "vysvetlenie alebo otázky"
-}`,
-          messages: [{
-            role: "user",
-            content: [
-              { type: "image", source: { type: "base64", media_type: "image/jpeg", data: b64 } },
-              { type: "text", text: `Aktuálny rok: ${year}. Extrahuj účtovný zápis z tohto dokladu.` }
-            ]
-          }]
-        })
-      });
-
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error?.message || "API chyba");
-
-      const text = data.content?.map(b => b.text || "").join("") || "";
-      const clean = text.replace(/```json|```/g, "").trim();
-      const parsed = JSON.parse(clean);
-
-      setResult(parsed);
-      setForm({
-        date: parsed.date || new Date().toISOString().slice(0, 10),
-        description: parsed.description || "",
-        debitAcc: parsed.debitAcc || "",
-        creditAcc: parsed.creditAcc || "",
-        amount: parsed.amount ? String(parsed.amount) : "",
-      });
-      setStage("review");
+      if (!window.pdfjsLib) {
+        await new Promise((res, rej) => {
+          const s = document.createElement("script");
+          s.src = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
+          s.onload = res; s.onerror = rej;
+          document.head.appendChild(s);
+        });
+        window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+          "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+      }
+      const arrayBuffer = await file.arrayBuffer();
+      const pdf = await window.pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+      let fullText = "";
+      for (let i = 1; i <= Math.min(pdf.numPages, 3); i++) {
+        const page = await pdf.getPage(i);
+        const tc = await page.getTextContent();
+        fullText += tc.items.map(it => it.str).join(" ") + "\n";
+      }
+      if (!fullText.trim()) throw new Error("PDF neobsahuje extrahovatelny text. Skuste nahrat ako obrazok.");
+      const text = await callClaude([{ role: "user", content:
+        "Aktualny rok: " + year + ". Extrahuj uctovny zapis z tohto dokladu:\n\n" + fullText.slice(0, 4000)
+      }]);
+      parseResult(text);
     } catch (e) {
-      setError("Chyba OCR: " + e.message);
+      setError("Chyba PDF: " + e.message);
       setStage("capture");
     }
   };
 
   const confidenceColor = { high: "#10b981", medium: "#f59e0b", low: "#f87171" };
-  const confidenceLabel = { high: "Vysoká istota", medium: "Stredná istota", low: "Nízka istota — skontrolujte" };
-
-  const sectionTitle = (t) => (
-    <div style={{ fontSize: 10, letterSpacing: 1, textTransform: "uppercase", color: "#6b7280", marginBottom: 6, marginTop: 14 }}>{t}</div>
-  );
+  const confidenceLabel = { high: "Vysoka istota", medium: "Stredna istota", low: "Nizka istota - skontrolujte" };
 
   return (
-    <Modal title="📷 OCR — Nahrať doklad" onClose={onClose}>
+    <Modal title="Nahrat doklad (OCR)" onClose={onClose}>
       {stage === "capture" && (
         <div>
           <div style={{ textAlign: "center", padding: "20px 0" }}>
-            <div style={{ fontSize: 52, marginBottom: 12 }}>📄</div>
+            <div style={{ fontSize: 48, marginBottom: 10 }}>📄</div>
             <div style={{ color: "#9ca3af", fontSize: 13, marginBottom: 20 }}>
-              Odfote doklad kamerou alebo vyberte obrázok z galérie.<br />
-              <span style={{ fontSize: 11, color: "#6b7280" }}>Faktúra, pokladničný doklad, výpis z účtu</span>
+              Odfote doklad, vyberte obrazok alebo nahrajte PDF.<br />
+              <span style={{ fontSize: 11, color: "#6b7280" }}>Faktura, pokladnicny doklad, vypis z uctu</span>
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 10, alignItems: "center" }}>
               <button
-                onClick={() => { fileRef.current.setAttribute("capture","environment"); fileRef.current.click(); }}
-                style={{ ...btn("#7c3aed"), padding: "12px 28px", fontSize: 14, width: "100%", maxWidth: 280 }}
+                onClick={() => { imgRef.current.setAttribute("capture","environment"); imgRef.current.click(); }}
+                style={{ ...btn("#7c3aed"), padding: "12px 28px", fontSize: 14, width: "100%", maxWidth: 300 }}
               >
-                📷 Odfotiť kamerou
+                📷 Odofotit kamerou
               </button>
               <button
-                onClick={() => { fileRef.current.removeAttribute("capture"); fileRef.current.click(); }}
-                style={{ ...btn("#374151"), padding: "10px 28px", fontSize: 13, width: "100%", maxWidth: 280 }}
+                onClick={() => { imgRef.current.removeAttribute("capture"); imgRef.current.click(); }}
+                style={{ ...btn("#1d4ed8"), padding: "11px 28px", fontSize: 13, width: "100%", maxWidth: 300 }}
               >
-                🖼 Vybrať z galérie
+                🖼 Vybrat obrazok z galerie
+              </button>
+              <button
+                onClick={() => pdfRef.current.click()}
+                style={{ ...btn("#b45309"), padding: "11px 28px", fontSize: 13, width: "100%", maxWidth: 300 }}
+              >
+                📄 Nahrat PDF doklad
               </button>
             </div>
-            <input
-              ref={fileRef}
-              type="file"
-              accept="image/*"
-              style={{ display: "none" }}
-              onChange={e => handleFile(e.target.files[0])}
-            />
+            <input ref={imgRef} type="file" accept="image/*" style={{ display: "none" }}
+              onChange={e => handleImageFile(e.target.files[0])} />
+            <input ref={pdfRef} type="file" accept="application/pdf,.pdf" style={{ display: "none" }}
+              onChange={e => handlePdfFile(e.target.files[0])} />
           </div>
           {error && (
             <div style={{ background: "#1f0d0d", border: "1px solid #7f1d1d", borderRadius: 8, padding: "10px 14px", color: "#f87171", fontSize: 12, marginTop: 8 }}>
               {error}
               <div style={{ marginTop: 8 }}>
-                <button onClick={() => setError("")} style={{ ...btn("#374151"), padding: "4px 12px", fontSize: 11 }}>Skúsiť znova</button>
+                <button onClick={() => setError("")} style={{ ...btn("#374151"), padding: "4px 12px", fontSize: 11 }}>Skusit znova</button>
               </div>
             </div>
           )}
@@ -744,11 +766,18 @@ Odpovedz VÝLUČNE JSON objektom (bez markdown, bez textu navyše):
             <img src={imgPreview} alt="doklad"
               style={{ maxWidth: "100%", maxHeight: 200, borderRadius: 8, marginBottom: 20, objectFit: "contain", border: "1px solid #1f2937" }} />
           )}
+          {pdfName && (
+            <div style={{ background: "#1a1a2e", border: "1px solid #b45309", borderRadius: 8, padding: "12px 20px", marginBottom: 20, color: "#fbbf24", fontSize: 13 }}>
+              📄 {pdfName}
+            </div>
+          )}
           <div style={{ fontSize: 32, marginBottom: 12 }}>
             <span style={{ display: "inline-block", animation: "spin 1s linear infinite" }}>⚙️</span>
           </div>
-          <div style={{ color: "#9ca3af", fontSize: 13 }}>Claude analyzuje doklad…</div>
-          <div style={{ color: "#6b7280", fontSize: 11, marginTop: 6 }}>Rozpoznávanie textu a kontextu</div>
+          <div style={{ color: "#9ca3af", fontSize: 13 }}>Claude analyzuje doklad...</div>
+          <div style={{ color: "#6b7280", fontSize: 11, marginTop: 6 }}>
+            {pdfName ? "Extrahovanie textu z PDF..." : "Rozpoznavanie textu a kontextu"}
+          </div>
           <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
         </div>
       )}
@@ -760,12 +789,18 @@ Odpovedz VÝLUČNE JSON objektom (bez markdown, bez textu navyše):
               <img src={imgPreview} alt="doklad"
                 style={{ width: 80, height: 80, borderRadius: 6, objectFit: "cover", border: "1px solid #1f2937", flexShrink: 0 }} />
             )}
+            {pdfName && (
+              <div style={{ background: "#1a1a2e", border: "1px solid #b45309", borderRadius: 6, padding: "8px 14px", color: "#fbbf24", fontSize: 12, flexShrink: 0 }}>
+                📄 {pdfName}
+              </div>
+            )}
             <div style={{ flex: 1 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-                <span style={{ fontSize: 11, fontWeight: 700, color: confidenceColor[result.confidence] || "#9ca3af",
+                <span style={{ fontSize: 11, fontWeight: 700,
+                  color: confidenceColor[result.confidence] || "#9ca3af",
                   background: (confidenceColor[result.confidence] || "#9ca3af") + "22",
                   padding: "3px 8px", borderRadius: 4 }}>
-                  ● {confidenceLabel[result.confidence] || result.confidence}
+                  {confidenceLabel[result.confidence] || result.confidence}
                 </span>
               </div>
               {result.notes && (
@@ -774,53 +809,53 @@ Odpovedz VÝLUČNE JSON objektom (bez markdown, bez textu navyše):
             </div>
           </div>
 
-          {sectionTitle("Skontrolujte a upravte pred uložením")}
+          <div style={{ fontSize: 10, letterSpacing: 1, textTransform: "uppercase", color: "#6b7280", marginBottom: 6, marginTop: 14 }}>Skontrolujte a upravte pred ulozenim</div>
 
-          {[{ label: "Dátum", key: "date", type: "date" },
-            { label: "Popis", key: "description", type: "text", placeholder: "Popis operácie" }
-          ].map(f => (
-            <div key={f.key} style={{ marginBottom: 12 }}>
-              <label style={{ display: "block", fontSize: 10, color: "#6b7280", marginBottom: 3, letterSpacing: 1, textTransform: "uppercase" }}>{f.label}</label>
-              <input type={f.type} value={form[f.key]} placeholder={f.placeholder}
-                onChange={e => setForm(x => ({ ...x, [f.key]: e.target.value }))} style={inp} />
+          <div style={{ display: "grid", gridTemplateColumns: "140px 1fr", gap: 10, marginBottom: 12 }}>
+            <div>
+              <label style={{ display: "block", fontSize: 10, color: "#6b7280", marginBottom: 3, letterSpacing: 1, textTransform: "uppercase" }}>Datum</label>
+              <input type="date" value={form.date} onChange={e => setForm(x => ({ ...x, date: e.target.value }))} style={inp} />
             </div>
-          ))}
+            <div>
+              <label style={{ display: "block", fontSize: 10, color: "#6b7280", marginBottom: 3, letterSpacing: 1, textTransform: "uppercase" }}>Popis / cislo dokladu</label>
+              <input type="text" value={form.description} placeholder="Napr. FAV 2024/001"
+                onChange={e => setForm(x => ({ ...x, description: e.target.value }))} style={inp} />
+            </div>
+          </div>
 
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 12 }}>
-            {[{ label: "MD účet", key: "debitAcc", color: "#4ade80" },
-              { label: "D účet", key: "creditAcc", color: "#f472b6" }
-            ].map(f => (
+            {[{ label: "MD ucet", key: "debitAcc", color: "#4ade80" }, { label: "D ucet", key: "creditAcc", color: "#f472b6" }].map(f => (
               <div key={f.key}>
                 <label style={{ display: "block", fontSize: 10, color: f.color, marginBottom: 3, letterSpacing: 1, textTransform: "uppercase" }}>{f.label}</label>
                 <select value={form[f.key]} onChange={e => setForm(x => ({ ...x, [f.key]: e.target.value }))} style={inp}>
-                  <option value="">— vybrať —</option>
-                  {ACCOUNT_CHART.map(a => <option key={a.code} value={a.code}>{a.code} – {a.name}</option>)}
+                  <option value="">— vybrat —</option>
+                  {ACCOUNT_CHART.map(a => <option key={a.code} value={a.code}>{a.code} - {a.name}</option>)}
                 </select>
               </div>
             ))}
           </div>
 
           <div style={{ marginBottom: 16 }}>
-            <label style={{ display: "block", fontSize: 10, color: "#6b7280", marginBottom: 3, letterSpacing: 1, textTransform: "uppercase" }}>Suma (€)</label>
+            <label style={{ display: "block", fontSize: 10, color: "#6b7280", marginBottom: 3, letterSpacing: 1, textTransform: "uppercase" }}>Suma (EUR)</label>
             <input type="number" value={form.amount} placeholder="0.00"
-              onChange={e => setForm(x => ({ ...x, amount: e.target.value }))} style={inp} />
+              onChange={e => setForm(x => ({ ...x, amount: e.target.value }))} style={{ ...inp, fontSize: 18, fontWeight: 700 }} />
           </div>
 
           <div style={{ display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
-            <button onClick={() => { setStage("capture"); setImgB64(null); setImgPreview(null); }}
-              style={{ ...btn("#374151"), fontSize: 12 }}>← Nový doklad</button>
+            <button onClick={() => { setStage("capture"); setImgPreview(null); setPdfName(null); }}
+              style={{ ...btn("#374151"), fontSize: 12 }}>← Novy doklad</button>
             <div style={{ display: "flex", gap: 8 }}>
-              <button onClick={onClose} style={{ ...btn("#374151"), fontSize: 12 }}>Zrušiť</button>
+              <button onClick={onClose} style={{ ...btn("#374151"), fontSize: 12 }}>Zrusit</button>
               <button
                 onClick={() => {
                   if (!form.date || !form.debitAcc || !form.creditAcc || !form.amount) {
-                    alert("Vyplňte všetky povinné polia"); return;
+                    alert("Vyplnte vsetky povinne polia"); return;
                   }
                   onConfirm(form);
                 }}
                 style={{ ...btn("#7c3aed"), fontSize: 12 }}
               >
-                ✓ Použiť zápis
+                Pouzit zapis
               </button>
             </div>
           </div>
@@ -829,6 +864,7 @@ Odpovedz VÝLUČNE JSON objektom (bez markdown, bez textu navyše):
     </Modal>
   );
 }
+
 
 function PdfImportModal({ onClose, onImport, inp, btn }) {
   const [stage, setStage] = useState("upload");
@@ -2347,7 +2383,7 @@ function printReport(type, year) {
   a.download = (type === "suvaha" ? "Suvaha" : "VZS") + "_" + year + ".html";
   a.click();
 }
-
+function App(
     const root = ReactDOM.createRoot(document.getElementById('root'));
     root.render(<App />);
   </script>
