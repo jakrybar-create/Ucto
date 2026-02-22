@@ -1489,6 +1489,77 @@ function printVykaz(type, year, companyName, suvahaA, suvahaP, vzsComputed) {
 
 
 
+// ── Kategórie dokladov → automatické účtovanie ───────────────────────────────
+const CATEGORIES = [
+  // ── Vydané faktúry ──
+  { group: "Vydané faktúry",  id: "vf_sluzby",    label: "Vydaná faktúra — služby",             debit: "311", credit: "602", descPrefix: "Fakt. vydaná — služby" },
+  { group: "Vydané faktúry",  id: "vf_tovar",     label: "Vydaná faktúra — tovar",              debit: "311", credit: "604", descPrefix: "Fakt. vydaná — tovar" },
+  { group: "Vydané faktúry",  id: "vf_vyrobky",   label: "Vydaná faktúra — výrobky",            debit: "311", credit: "601", descPrefix: "Fakt. vydaná — výrobky" },
+  // ── Prijaté faktúry ──
+  { group: "Prijaté faktúry", id: "pf_sluzby",    label: "Prijatá faktúra — služby",            debit: "518", credit: "321", descPrefix: "Fakt. prijatá — služby" },
+  { group: "Prijaté faktúry", id: "pf_material",  label: "Prijatá faktúra — materiál",          debit: "112", credit: "321", descPrefix: "Fakt. prijatá — materiál" },
+  { group: "Prijaté faktúry", id: "pf_energia",   label: "Prijatá faktúra — energia",           debit: "502", credit: "321", descPrefix: "Fakt. prijatá — energia" },
+  { group: "Prijaté faktúry", id: "pf_opravy",    label: "Prijatá faktúra — opravy a údržba",   debit: "511", credit: "321", descPrefix: "Fakt. prijatá — opravy" },
+  { group: "Prijaté faktúry", id: "pf_cestovne",  label: "Prijatá faktúra — cestovné",          debit: "512", credit: "321", descPrefix: "Fakt. prijatá — cestovné" },
+  { group: "Prijaté faktúry", id: "pf_repr",      label: "Prijatá faktúra — reprezentácia",     debit: "513", credit: "321", descPrefix: "Fakt. prijatá — reprezentácia" },
+  { group: "Prijaté faktúry", id: "pf_najem",     label: "Prijatá faktúra — nájom",             debit: "518", credit: "321", descPrefix: "Fakt. prijatá — nájom" },
+  { group: "Prijaté faktúry", id: "pf_ost",       label: "Prijatá faktúra — ostatné náklady",   debit: "548", credit: "321", descPrefix: "Fakt. prijatá — ostatné" },
+  // ── Bankové operácie ──
+  { group: "Banka",           id: "bk_inkaso",    label: "Príjem od odberateľa (banka)",        debit: "221", credit: "311", descPrefix: "Úhrada faktúry — príjem" },
+  { group: "Banka",           id: "bk_uhrada",    label: "Úhrada dodávateľovi (banka)",         debit: "321", credit: "221", descPrefix: "Úhrada faktúry — výdaj" },
+  { group: "Banka",           id: "bk_poplatky",  label: "Bankové poplatky",                    debit: "568", credit: "221", descPrefix: "Bankové poplatky" },
+  { group: "Banka",           id: "bk_urok_v",    label: "Úroky prijaté z banky",               debit: "221", credit: "662", descPrefix: "Úroky prijaté" },
+  { group: "Banka",           id: "bk_urok_n",    label: "Úroky zaplatené (bankový úver)",      debit: "562", credit: "221", descPrefix: "Úroky zaplatené" },
+  { group: "Banka",           id: "bk_kurz_zisk", label: "Kurzový zisk",                        debit: "221", credit: "663", descPrefix: "Kurzový zisk" },
+  { group: "Banka",           id: "bk_kurz_str",  label: "Kurzová strata",                      debit: "563", credit: "221", descPrefix: "Kurzová strata" },
+  // ── Pokladňa ──
+  { group: "Pokladňa",        id: "pk_prijem",    label: "Príjem hotovosti (tržba)",            debit: "211", credit: "602", descPrefix: "Pokladničný príjem — tržba" },
+  { group: "Pokladňa",        id: "pk_vydaj_sl",  label: "Výdaj — nákup služby",                debit: "518", credit: "211", descPrefix: "Pokladničný výdaj — služby" },
+  { group: "Pokladňa",        id: "pk_vydaj_mat", label: "Výdaj — nákup materiálu",             debit: "501", credit: "211", descPrefix: "Pokladničný výdaj — materiál" },
+  { group: "Pokladňa",        id: "pk_cestovne",  label: "Výdaj — cestovné náhrady",            debit: "512", credit: "211", descPrefix: "Cestovné náhrady" },
+  { group: "Pokladňa",        id: "pk_repr",      label: "Výdaj — reprezentácia",               debit: "513", credit: "211", descPrefix: "Reprezentácia" },
+  { group: "Pokladňa",        id: "pk_ost",       label: "Výdaj — ostatné",                     debit: "548", credit: "211", descPrefix: "Pokladničný výdaj — ostatné" },
+  { group: "Pokladňa",        id: "pk_vklad",     label: "Vklad hotovosti na účet",             debit: "221", credit: "261", descPrefix: "Prevod pokladňa → banka" },
+  { group: "Pokladňa",        id: "pk_vyber",     label: "Výber hotovosti z banky",             debit: "261", credit: "221", descPrefix: "Výber z banky do pokladne" },
+  // ── Mzdy ──
+  { group: "Mzdy",            id: "mzdy_naklady", label: "Mzdové náklady",                      debit: "521", credit: "331", descPrefix: "Mzdy — náklady" },
+  { group: "Mzdy",            id: "mzdy_odvody",  label: "Odvody SP a ZP (zamestnávateľ)",      debit: "524", credit: "336", descPrefix: "Odvody SP/ZP — zamestnávateľ" },
+  { group: "Mzdy",            id: "mzdy_vyplata", label: "Výplata mzdy",                        debit: "331", credit: "221", descPrefix: "Výplata mzdy" },
+  { group: "Mzdy",            id: "mzdy_uh_odv",  label: "Úhrada odvodov SP a ZP",              debit: "336", credit: "221", descPrefix: "Úhrada odvodov SP/ZP" },
+  { group: "Mzdy",            id: "mzdy_uh_dan",  label: "Úhrada preddavku na daň zo mzdy",    debit: "342", credit: "221", descPrefix: "Úhrada preddavku na daň" },
+  // ── Dane ──
+  { group: "Dane",            id: "dan_prijem",   label: "Daň z príjmov — splatná",             debit: "591", credit: "341", descPrefix: "Daň z príjmov — predpis" },
+  { group: "Dane",            id: "dan_uh",        label: "Úhrada dane z príjmov",               debit: "341", credit: "221", descPrefix: "Úhrada dane z príjmov" },
+  { group: "Dane",            id: "dan_dph_v",     label: "DPH na výstupe (z predaja)",          debit: "604", credit: "343", descPrefix: "DPH na výstupe" },
+  { group: "Dane",            id: "dan_dph_n",     label: "DPH na vstupe (z nákupu)",            debit: "343", credit: "321", descPrefix: "DPH na vstupe" },
+  { group: "Dane",            id: "dan_dph_uh",    label: "Úhrada DPH daňovému úradu",          debit: "343", credit: "221", descPrefix: "Úhrada DPH" },
+  // ── Dlhodobý majetok ──
+  { group: "Majetok",         id: "maj_nakup",    label: "Nákup DHM (faktúra)",                 debit: "042", credit: "321", descPrefix: "Nákup DHM — faktúra" },
+  { group: "Majetok",         id: "maj_zarad",    label: "Zaradenie DHM do evidencie",          debit: "022", credit: "042", descPrefix: "Zaradenie do evidencie" },
+  { group: "Majetok",         id: "maj_odpis",    label: "Odpisy DHM/DNM",                      debit: "551", credit: "082", descPrefix: "Odpisy DHM" },
+  { group: "Majetok",         id: "maj_prodaj",   label: "Predaj DHM — tržba",                  debit: "311", credit: "641", descPrefix: "Predaj DHM — tržba" },
+  // ── Ostatné ──
+  { group: "Ostatné",         id: "ost_rezerva",  label: "Tvorba rezervy",                      debit: "548", credit: "323", descPrefix: "Tvorba rezervy" },
+  { group: "Ostatné",         id: "ost_manko",    label: "Manko / škoda",                       debit: "549", credit: "112", descPrefix: "Manko/škoda" },
+  { group: "Ostatné",         id: "ost_dar",      label: "Dar (náklad)",                        debit: "543", credit: "321", descPrefix: "Dar" },
+  { group: "Ostatné",         id: "ost_pokuta",   label: "Pokuta / penále (náklad)",            debit: "545", credit: "321", descPrefix: "Pokuta/penále" },
+  { group: "Ostatné",         id: "manual",       label: "✎ Ručné zadanie účtov",              debit: "",    credit: "",    descPrefix: "" },
+  // ── Dividendy ──
+  { group: "Dividendy",       id: "div_predpis",  label: "Predpis dividendy spoločníkovi",      debit: "431", credit: "364", descPrefix: "Predpis dividendy" },
+  { group: "Dividendy",       id: "div_uhrada",   label: "Úhrada dividendy (banka)",            debit: "364", credit: "221", descPrefix: "Úhrada dividendy" },
+  { group: "Dividendy",       id: "div_zrazka",   label: "Zrážková daň z dividendy",            debit: "364", credit: "342", descPrefix: "Zrážková daň z dividendy" },
+  { group: "Dividendy",       id: "div_uh_dan",   label: "Úhrada zrážkovej dane (DÚ)",         debit: "342", credit: "221", descPrefix: "Úhrada zrážkovej dane" },
+  // ── Nájom ──
+  { group: "Nájom",           id: "naj_vf",       label: "Vydaná faktúra za nájom",             debit: "311", credit: "602", descPrefix: "Fakt. vydaná — nájom" },
+  { group: "Nájom",           id: "naj_prijem_b", label: "Príjem nájmu na bankový účet",        debit: "221", credit: "602", descPrefix: "Príjem nájmu — banka" },
+  { group: "Nájom",           id: "naj_prijem_p", label: "Príjem nájmu v hotovosti",            debit: "211", credit: "602", descPrefix: "Príjem nájmu — pokladňa" },
+  { group: "Nájom",           id: "naj_pf",       label: "Prijatá faktúra za nájom (nájomca)",  debit: "518", credit: "321", descPrefix: "Fakt. prijatá — nájom" },
+  { group: "Nájom",           id: "naj_uh",       label: "Úhrada nájmu (nájomca)",              debit: "321", credit: "221", descPrefix: "Úhrada nájmu" },
+];
+
+const CAT_BY_ID = Object.fromEntries(CATEGORIES.map(c => [c.id, c]));
+
+
 function App() {
   const [data, setData] = useState({});
   const [year, setYear] = useState(String(new Date().getFullYear()));
@@ -1565,20 +1636,25 @@ function App() {
 
   const addEntry = () => {
     if (!form.date || !form.debitAcc || !form.creditAcc || !form.amount) return;
+    const base = {
+      date: form.date,
+      description: form.description,
+      debitAcc: form.debitAcc,
+      creditAcc: form.creditAcc,
+      amount: parseFloat(form.amount),
+      categoryId: form.categoryId || "",
+    };
     if (form.editId) {
       setDataAndSave(prev => ({
         ...prev,
         [year]: { ...(prev[year] ?? emptyYear()), entries: (prev[year]?.entries ?? []).map(e =>
-          e.id === form.editId
-            ? { id: e.id, date: form.date, description: form.description, debitAcc: form.debitAcc, creditAcc: form.creditAcc, amount: parseFloat(form.amount) }
-            : e
+          e.id === form.editId ? { id: e.id, ...base } : e
         )}
       }));
     } else {
-      const entry = { id: Date.now(), date: form.date, description: form.description, debitAcc: form.debitAcc, creditAcc: form.creditAcc, amount: parseFloat(form.amount) };
       setDataAndSave(prev => ({
         ...prev,
-        [year]: { ...(prev[year] ?? emptyYear()), entries: [...(prev[year]?.entries ?? []), entry] }
+        [year]: { ...(prev[year] ?? emptyYear()), entries: [...(prev[year]?.entries ?? []), { id: Date.now(), ...base }] }
       }));
     }
     setForm({ date: today(), description: "", debitAcc: "", creditAcc: "", amount: "" });
@@ -1593,7 +1669,7 @@ function App() {
   };
 
   const editEntry = (e) => {
-    setForm({ date: e.date, description: e.description, debitAcc: e.debitAcc, creditAcc: e.creditAcc, amount: String(e.amount), editId: e.id });
+    setForm({ date: e.date, description: e.description, debitAcc: e.debitAcc, creditAcc: e.creditAcc, amount: String(e.amount), editId: e.id, categoryId: e.categoryId || "manual" });
     setModal("entry");
   };
 
@@ -1761,7 +1837,7 @@ function App() {
             <div style={{ borderRadius: 12, overflow: "hidden", border: "1px solid #1f2937" }}>
               <table style={{ width: "100%", borderCollapse: "collapse" }}>
                 <thead style={{ background: "#0d1117" }}>
-                  <tr>{["Dátum","Popis","MD účet","D účet","Suma (€)",""].map(h => <th key={h} style={th}>{h}</th>)}</tr>
+                  <tr>{["Dátum","Kategória / Popis","MD účet","D účet","Suma (€)",""].map(h => <th key={h} style={th}>{h}</th>)}</tr>
                 </thead>
                 <tbody>
                   {filteredEntries.length === 0 && (
@@ -1773,7 +1849,14 @@ function App() {
                   {[...filteredEntries].reverse().map(e => (
                     <tr key={e.id}>
                       <td style={{ ...td, color: "#9ca3af" }}>{e.date}</td>
-                      <td style={{ ...td, maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.description}</td>
+                      <td style={{ ...td, maxWidth: 300 }}>
+                        {e.categoryId && CAT_BY_ID[e.categoryId] && e.categoryId !== "manual" && (
+                          <div style={{ fontSize: 10, color: "#6366f1", fontWeight: 600, marginBottom: 2, letterSpacing: 0.5 }}>
+                            {CAT_BY_ID[e.categoryId].group} › {CAT_BY_ID[e.categoryId].label}
+                          </div>
+                        )}
+                        <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 12 }}>{e.description}</div>
+                      </td>
                       <td style={{ ...td, color: "#4ade80" }}>{e.debitAcc} <span style={{ color: "#374151" }}>({ledger[e.debitAcc]?.name ?? "?"})</span></td>
                       <td style={{ ...td, color: "#f472b6" }}>{e.creditAcc} <span style={{ color: "#374151" }}>({ledger[e.creditAcc]?.name ?? "?"})</span></td>
                       <td style={{ ...td, textAlign: "right", fontWeight: 700, color: "#10b981", whiteSpace: "nowrap" }}>{fmt(e.amount)}</td>
@@ -2031,35 +2114,99 @@ function App() {
       {modal === "importXml" && <XmlImportModal onClose={() => setModal(null)} onImport={handleAiImport} inp={inp} btn={btn} />}
 
       {/* ── STANDARD MODALS ── */}
-      {modal === "entry" && (
-        <Modal title={form.editId ? "✏️ Upraviť zápis" : "Nový účtovný zápis"} onClose={() => { setForm({ date: today(), description: "", debitAcc: "", creditAcc: "", amount: "" }); setModal(null); }}>
-          {[{ label: "Dátum", key: "date", type: "date" }, { label: "Popis", key: "description", type: "text", placeholder: "Popis operácie" }].map(f => (
-            <div key={f.key} style={{ marginBottom: 14 }}>
-              <label style={{ display: "block", fontSize: 11, color: "#9ca3af", marginBottom: 4, letterSpacing: 1, textTransform: "uppercase" }}>{f.label}</label>
-              <input type={f.type} value={form[f.key]} placeholder={f.placeholder} onChange={e => setForm(x => ({ ...x, [f.key]: e.target.value }))} style={inp} />
+      {modal === "entry" && (() => {
+        const selCat = CAT_BY_ID[form.categoryId];
+        const isManual = !form.categoryId || form.categoryId === "manual";
+        const groups = [...new Set(CATEGORIES.map(c => c.group))];
+        const lbl = (text, color) => (
+          <label style={{ display: "block", fontSize: 11, color: color || "#9ca3af", marginBottom: 4, letterSpacing: 1, textTransform: "uppercase" }}>{text}</label>
+        );
+        const onCatChange = (id) => {
+          const cat = CAT_BY_ID[id];
+          if (!cat) return;
+          setForm(x => ({
+            ...x,
+            categoryId: id,
+            debitAcc:  cat.debit  || x.debitAcc,
+            creditAcc: cat.credit || x.creditAcc,
+            description: cat.descPrefix && !x.description ? cat.descPrefix : x.description,
+          }));
+        };
+        return (
+          <Modal title={form.editId ? "✏️ Upraviť zápis" : "➕ Nový doklad"} onClose={() => { setForm({ date: today(), description: "", debitAcc: "", creditAcc: "", amount: "" }); setModal(null); }}>
+
+            {/* KATEGÓRIA */}
+            <div style={{ marginBottom: 16 }}>
+              {lbl("Kategória dokladu")}
+              <select value={form.categoryId || ""} onChange={e => onCatChange(e.target.value)} style={{ ...inp, fontWeight: 600 }}>
+                <option value="">— vybrať kategóriu —</option>
+                {groups.map(g => (
+                  <optgroup key={g} label={g}>
+                    {CATEGORIES.filter(c => c.group === g).map(c => (
+                      <option key={c.id} value={c.id}>{c.label}</option>
+                    ))}
+                  </optgroup>
+                ))}
+              </select>
             </div>
-          ))}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 14 }}>
-            {[{ label: "MD účet", key: "debitAcc", color: "#4ade80" }, { label: "D účet", key: "creditAcc", color: "#f472b6" }].map(f => (
-              <div key={f.key}>
-                <label style={{ display: "block", fontSize: 11, color: f.color, marginBottom: 4, letterSpacing: 1, textTransform: "uppercase" }}>{f.label}</label>
-                <select value={form[f.key]} onChange={e => setForm(x => ({ ...x, [f.key]: e.target.value }))} style={inp}>
-                  <option value="">— vybrať —</option>
-                  {ACCOUNT_CHART.map(a => <option key={a.code} value={a.code}>{a.code} – {a.name}</option>)}
-                </select>
+
+            {/* Ak je vybraná kategória — zobraziť preview účtov */}
+            {selCat && selCat.id !== "manual" && (
+              <div style={{ marginBottom: 16, padding: "10px 14px", background: "#0d1a2e", border: "1px solid #1e3a5f", borderRadius: 8, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                <span style={{ fontSize: 11, color: "#6b7280" }}>Automatické účtovanie:</span>
+                <span style={{ color: "#4ade80", fontWeight: 700, fontFamily: "monospace" }}>MD {selCat.debit}</span>
+                <span style={{ color: "#374151" }}>→</span>
+                <span style={{ color: "#f472b6", fontWeight: 700, fontFamily: "monospace" }}>D {selCat.credit}</span>
+                <button onClick={() => setForm(x => ({ ...x, categoryId: "manual" }))}
+                  style={{ marginLeft: "auto", background: "none", border: "1px solid #374151", color: "#9ca3af", borderRadius: 4, padding: "2px 8px", fontSize: 11, cursor: "pointer" }}>
+                  Zmeniť účty
+                </button>
               </div>
-            ))}
-          </div>
-          <div style={{ marginBottom: 20 }}>
-            <label style={{ display: "block", fontSize: 11, color: "#9ca3af", marginBottom: 4, letterSpacing: 1, textTransform: "uppercase" }}>Suma (€)</label>
-            <input type="number" value={form.amount} placeholder="0.00" onChange={e => setForm(x => ({ ...x, amount: e.target.value }))} style={inp} />
-          </div>
-          <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
-            <button onClick={() => setModal(null)} style={btn("#374151")}>Zrušiť</button>
-            <button onClick={addEntry} style={btn(form.editId ? "#6366f1" : "#10b981")}>{form.editId ? "✓ Uložiť zmeny" : "Uložiť zápis"}</button>
-          </div>
-        </Modal>
-      )}
+            )}
+
+            {/* DÁTUM + POPIS */}
+            <div style={{ display: "grid", gridTemplateColumns: "140px 1fr", gap: 10, marginBottom: 14 }}>
+              <div>
+                {lbl("Dátum")}
+                <input type="date" value={form.date} onChange={e => setForm(x => ({ ...x, date: e.target.value }))} style={inp} />
+              </div>
+              <div>
+                {lbl("Popis / číslo dokladu")}
+                <input type="text" value={form.description} placeholder="Napr. FAV 2024/001" onChange={e => setForm(x => ({ ...x, description: e.target.value }))} style={inp} />
+              </div>
+            </div>
+
+            {/* ÚČTY — zobrazené len ak manuálne alebo na zmenu */}
+            {isManual && (
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 14 }}>
+                {[{ label: "MD účet (Má dať)", key: "debitAcc", color: "#4ade80" }, { label: "D účet (Dal)", key: "creditAcc", color: "#f472b6" }].map(f => (
+                  <div key={f.key}>
+                    {lbl(f.label, f.color)}
+                    <select value={form[f.key]} onChange={e => setForm(x => ({ ...x, [f.key]: e.target.value }))} style={inp}>
+                      <option value="">— vybrať —</option>
+                      {ACCOUNT_CHART.map(a => <option key={a.code} value={a.code}>{a.code} – {a.name}</option>)}
+                    </select>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {/* SUMA */}
+            <div style={{ marginBottom: 20 }}>
+              {lbl("Suma (€)")}
+              <input type="number" value={form.amount} placeholder="0.00" min="0" step="0.01"
+                onChange={e => setForm(x => ({ ...x, amount: e.target.value }))} style={{ ...inp, fontSize: 18, fontWeight: 700 }} />
+            </div>
+
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
+              <button onClick={() => { setForm({ date: today(), description: "", debitAcc: "", creditAcc: "", amount: "" }); setModal(null); }} style={btn("#374151")}>Zrušiť</button>
+              <button onClick={addEntry} style={btn(form.editId ? "#6366f1" : "#10b981")}>
+                {form.editId ? "✓ Uložiť zmeny" : "✓ Zaúčtovať"}
+              </button>
+            </div>
+          </Modal>
+        );
+      })()}
 
       {modal === "newYear" && (
         <Modal title="Nový účtovný rok" onClose={() => setModal(null)}>
