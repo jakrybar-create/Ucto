@@ -607,7 +607,7 @@ function PreviewTable({ entries, selected, onToggle, onToggleAll }) {
 // ── PDF IMPORT MODAL ──────────────────────────────────────────────────────────
 
 // ── OCR Doklad Modal ─────────────────────────────────────────────────────────
-function OcrModal({ onClose, onConfirm, inp, btn, year }) {
+function OcrModal({ onClose, onConfirm, inp, btn, year, apiKey, onSaveApiKey }) {
   const [stage, setStage] = useState("capture");
   const [imgPreview, setImgPreview] = useState(null);
   const [pdfName, setPdfName] = useState(null);
@@ -639,14 +639,18 @@ function OcrModal({ onClose, onConfirm, inp, btn, year }) {
     setStage("review");
   };
 
+  const [localApiKey, setLocalApiKey] = useState(apiKey || "");
+
   const callClaude = async (messages) => {
+    const key = localApiKey.trim();
+    if (!key) throw new Error("Zadajte Anthropic API kluč v nastaveniach nižšie.");
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "x-api-key": key, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
       body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 1000, system: SYSTEM_PROMPT, messages })
     });
     const data = await res.json();
-    if (!res.ok) throw new Error(data.error?.message || "API chyba");
+    if (!res.ok) throw new Error(data.error?.message || "API chyba " + res.status);
     return data.content?.map(b => b.text || "").join("") || "";
   };
 
@@ -757,6 +761,31 @@ function OcrModal({ onClose, onConfirm, inp, btn, year }) {
               </div>
             </div>
           )}
+
+          {/* API KEY SETTINGS */}
+          <div style={{ marginTop: 20, padding: "14px 16px", background: "#0d1117", border: "1px solid #1f2937", borderRadius: 10 }}>
+            <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 8, letterSpacing: 1, textTransform: "uppercase" }}>
+              🔑 Anthropic API Kluč (potrebný pre OCR)
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <input
+                type="password"
+                value={localApiKey}
+                placeholder="sk-ant-api03-..."
+                onChange={e => setLocalApiKey(e.target.value)}
+                style={{ ...inp, flex: 1, fontFamily: "monospace", fontSize: 12 }}
+              />
+              <button
+                onClick={() => { onSaveApiKey(localApiKey.trim()); alert("API kluč uložený!"); }}
+                style={{ ...btn("#166534"), padding: "0 14px", fontSize: 12, whiteSpace: "nowrap" }}
+              >
+                Uložiť
+              </button>
+            </div>
+            <div style={{ fontSize: 10, color: "#4b5563", marginTop: 6 }}>
+              Ziskajte kluč na <strong style={{ color: "#60a5fa" }}>console.anthropic.com</strong> → API Keys. Uloží sa lokálne v prehliadači.
+            </div>
+          </div>
         </div>
       )}
 
@@ -1605,6 +1634,8 @@ function App() {
 
   const [form, setForm] = useState({ date: today(), description: "", debitAcc: "", creditAcc: "", amount: "" });
   const [importText, setImportText] = useState("");
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem("anthropic_api_key") || "");
+  const saveApiKey = (key) => { setApiKey(key); localStorage.setItem("anthropic_api_key", key); };
   const [newYearVal, setNewYearVal] = useState("");
   const [openingAcc, setOpeningAcc] = useState({ code: "", debit: "", credit: "" });
   const [filterAcc, setFilterAcc] = useState("");
@@ -2291,6 +2322,8 @@ function App() {
           inp={inp}
           btn={btn}
           year={year}
+          apiKey={apiKey}
+          onSaveApiKey={saveApiKey}
         />
       )}
 
