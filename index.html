@@ -1742,7 +1742,6 @@ function App() {
 
   const createYear = () => {
     if (!newYearVal || data[newYearVal]) return;
-    // Najdi predchadzajuci rok (najblizsí menší ako nový)
     const prevYear = Object.keys(data)
       .filter(y => parseInt(y) < parseInt(newYearVal))
       .sort((a, b) => b - a)[0];
@@ -1750,19 +1749,66 @@ function App() {
     let openingBalances = {};
     if (prevYear) {
       const prevData = data[prevYear];
-      const prevLedger = calcLedger(prevData.entries ?? [], prevData.openingBalances ?? {});
-      // Prenesieme len súvahové účty (A a P) — triedy 0-4
-      // Nákladové (N, trieda 5) a výnosové (V, trieda 6) sa nulujú
-      for (const [code, acc] of Object.entries(prevLedger)) {
-        if (acc.type === "A" || acc.type === "P") {
-          const bal = balance(acc);
-          if (bal !== 0) {
-            // Prevedieme zostatok na správnu stranu
-            openingBalances[code] = acc.type === "A"
-              ? { debit: Math.max(bal, 0), credit: Math.max(-bal, 0) }
-              : { debit: Math.max(-bal, 0), credit: Math.max(bal, 0) };
-          }
+      const prevEntries = prevData.entries ?? [];
+      const prevOB = prevData.openingBalances ?? {};
+
+      // Zbierieme VŠETKY unikátne kódy účtov: z ACCOUNT_CHART + z pohybov + z openingBalances
+      const allCodes = new Set([
+        ...ACCOUNT_CHART.map(a => a.code),
+        ...prevEntries.map(e => e.debitAcc).filter(Boolean),
+        ...prevEntries.map(e => e.creditAcc).filter(Boolean),
+        ...Object.keys(prevOB),
+      ]);
+
+      // Vypočítame zostatok každého účtu manuálne
+      for (const code of allCodes) {
+        const accDef = ACCOUNT_CHART.find(a => a.code === code);
+        const type = accDef ? accDef.type : guessType(code);
+
+        // Preskočíme nákladové, výnosové a uzávierkové účty
+        if (type === "N" || type === "V" || type === "Z") continue;
+
+        // Otváracie zostatky z predch. roka
+        const ob = prevOB[code] ?? { debit: 0, credit: 0 };
+        let debit = ob.debit || 0;
+        let credit = ob.credit || 0;
+
+        // Pripočítame pohyby
+        for (const e of prevEntries) {
+          if (e.debitAcc === code) debit += (e.amount || 0);
+          if (e.creditAcc === code) credit += (e.amount || 0);
         }
+
+        const bal = (type === "A") ? debit - credit : credit - debit;
+        if (Math.abs(bal) < 0.005) continue; // preskočíme nulové zostatky
+
+        // Uložíme zostatok na správnu stranu
+        if (type === "A") {
+          openingBalances[code] = { debit: Math.max(bal, 0), credit: Math.max(-bal, 0) };
+        } else {
+          openingBalances[code] = { debit: Math.max(-bal, 0), credit: Math.max(bal, 0) };
+        }
+      }
+
+      // VH bežného roka prenesieme na účet 428 (nerozdelený zisk) alebo 429 (strata)
+      // Vypočítame VH z výnosov a nákladov
+      let vynos = 0, naklad = 0;
+      for (const e of prevEntries) {
+        const tD = (ACCOUNT_CHART.find(a => a.code === e.debitAcc)?.type) ?? guessType(e.debitAcc);
+        const tC = (ACCOUNT_CHART.find(a => a.code === e.creditAcc)?.type) ?? guessType(e.creditAcc);
+        if (tC === "V") vynos += (e.amount || 0);
+        if (tD === "N") naklad += (e.amount || 0);
+      }
+      const vh = vynos - naklad;
+      if (Math.abs(vh) >= 0.005) {
+        const acc428 = openingBalances["428"] ?? { debit: 0, credit: 0 };
+        if (vh > 0) {
+          openingBalances["428"] = { debit: acc428.debit, credit: acc428.credit + vh };
+        } else {
+          openingBalances["429"] = { debit: Math.abs(vh), credit: 0 };
+        }
+        // Vymažeme účet 431 (VH v schvaľovaní) — bol prenesený
+        delete openingBalances["431"];
       }
     }
 
