@@ -1,0 +1,1973 @@
+<!DOCTYPE html>
+<html lang="sk">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Podvojné účtovníctvo — COFIM</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0b0f1a; color: #f9fafb; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel" data-presets="react">
+    const { useState, useEffect, useCallback, useRef } = React;
+
+
+// ── helpers ──────────────────────────────────────────────────────────────────
+const STORAGE_KEY = "podvojne-uctovnictvo-v3";
+const fmt = (n) => new Intl.NumberFormat("sk-SK", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n ?? 0);
+const today = () => new Date().toISOString().slice(0, 10);
+
+const ACCOUNT_CHART = [
+  // Dlhodobý majetok
+  { code: "021", name: "Stavby", type: "A" },
+  { code: "022", name: "Samostatné hnuteľné veci", type: "A" },
+  { code: "029", name: "Ostatný DHM", type: "A" },
+  // Zásoby
+  { code: "112", name: "Materiál na sklade", type: "A" },
+  // Pohľadávky a fin. majetok
+  { code: "211", name: "Pokladnica", type: "A" },
+  { code: "221", name: "Bankové účty", type: "A" },
+  { code: "249", name: "Ostatné krátkodobé fin. výpomoci", type: "A" },
+  { code: "261", name: "Peniaze na ceste", type: "A" },
+  { code: "311", name: "Pohľadávky z obch. styku", type: "A" },
+  { code: "315", name: "Ostatné pohľadávky", type: "A" },
+  { code: "321", name: "Záväzky z obch. styku", type: "P" },
+  { code: "325", name: "Ostatné záväzky", type: "P" },
+  { code: "331", name: "Záväzky voči zamestnancom", type: "P" },
+  { code: "336", name: "Záväzky na soc. a zdrav. poistenie", type: "P" },
+  { code: "341", name: "Daň z príjmov", type: "P" },
+  { code: "342", name: "Ostatné priame dane", type: "P" },
+  { code: "411", name: "Základné imanie", type: "P" },
+  { code: "428", name: "Nerozdelený zisk min. rokov", type: "P" },
+  { code: "431", name: "Výsledok hospodárenia", type: "P" },
+  // Náklady
+  { code: "501", name: "Spotreba materiálu", type: "N" },
+  { code: "511", name: "Opravy a udržiavanie", type: "N" },
+  { code: "513", name: "Náklady na reprezentáciu", type: "N" },
+  { code: "518", name: "Ostatné služby", type: "N" },
+  { code: "521", name: "Mzdové náklady", type: "N" },
+  { code: "524", name: "Zákonné soc. poistenie", type: "N" },
+  { code: "551", name: "Odpisy DHM a DNM", type: "N" },
+  { code: "568", name: "Ostatné finančné náklady", type: "N" },
+  { code: "591", name: "Daň z príjmov - splatná", type: "N" },
+  // Výnosy
+  { code: "601", name: "Tržby za výrobky", type: "V" },
+  { code: "602", name: "Tržby za služby", type: "V" },
+  { code: "604", name: "Tržby za tovar", type: "V" },
+  { code: "648", name: "Ostatné výnosy z hospod.", type: "V" },
+  // Uzávierkové účty (vylúčené zo súvahy a výsledovky)
+  { code: "701", name: "Začiatočný účet súvahový", type: "Z" },
+  { code: "702", name: "Konečný účet súvahový", type: "Z" },
+  { code: "710", name: "Účet ziskov a strát", type: "Z" },
+];
+
+const typeLabel = { A: "Aktíva", P: "Pasíva", N: "Náklady", V: "Výnosy" };
+const typeColor = { A: "#4ade80", P: "#f472b6", N: "#f87171", V: "#60a5fa" };
+
+function emptyYear() { return { entries: [], openingBalances: {} }; }
+
+function guessType(code) {
+  const n = parseInt(code);
+  if (n >= 700 && n <= 799) return "Z"; // uzávierkové účty
+  if (n >= 100 && n <= 299) return "A";
+  if (n >= 300 && n <= 499) return "P";
+  if (n >= 500 && n <= 599) return "N";
+  if (n >= 600 && n <= 699) return "V";
+  return "A";
+}
+
+function calcLedger(entries, openingBalances) {
+  const ob0 = openingBalances ?? {};
+  const ledger = {};
+  for (const acc of ACCOUNT_CHART) {
+    if (!ledger[acc.code]) {
+      const ob = ob0[acc.code] ?? { debit: 0, credit: 0 };
+      ledger[acc.code] = { ...acc, debit: ob.debit, credit: ob.credit };
+    }
+  }
+  for (const e of entries) {
+    for (const code of [e.debitAcc, e.creditAcc]) {
+      if (code && !ledger[code]) {
+        const ob = ob0[code] ?? { debit: 0, credit: 0 };
+        ledger[code] = { code, name: code, type: guessType(code), debit: ob.debit, credit: ob.credit };
+      }
+    }
+  }
+  for (const e of entries) {
+    if (e.debitAcc && ledger[e.debitAcc]) ledger[e.debitAcc].debit += e.amount;
+    if (e.creditAcc && ledger[e.creditAcc]) ledger[e.creditAcc].credit += e.amount;
+  }
+  return ledger;
+}
+
+function balance(acc) {
+  return (acc.type === "A" || acc.type === "N") ? acc.debit - acc.credit : acc.credit - acc.debit;
+}
+
+// ── AI helpers ────────────────────────────────────────────────────────────────
+async function callClaude(messages, systemPrompt) {
+  let response;
+  try {
+    response = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 8000,
+        system: systemPrompt,
+        messages,
+      }),
+    });
+  } catch (networkErr) {
+    throw new Error(`Sieťová chyba: ${networkErr.message}. Skontrolujte pripojenie na internet.`);
+  }
+
+  // Read raw text first so we can always show what came back
+  let rawText;
+  try { rawText = await response.text(); } catch (_) { rawText = ""; }
+
+  if (!response.ok) {
+    let detail = `HTTP ${response.status}`;
+    try { const e = JSON.parse(rawText); detail = e?.error?.message ?? rawText.slice(0, 300); } catch (_) { detail = rawText.slice(0, 300) || `HTTP ${response.status}`; }
+    throw new Error(detail);
+  }
+
+  let data;
+  try { data = JSON.parse(rawText); }
+  catch (_) { throw new Error(`Server vrátil neplatný JSON (${response.status}): ${rawText.slice(0, 200)}`); }
+
+  if (data.error) throw new Error(data.error.message ?? JSON.stringify(data.error));
+  if (!data.content || !Array.isArray(data.content)) throw new Error(`Chýba pole 'content' v odpovedi. Odpoveď: ${rawText.slice(0, 200)}`);
+  return data.content.map(b => b.text ?? "").join("");
+}
+
+// Extract text from PDF using PDF.js (loaded from CDN)
+async function extractPdfText(file, onProgress) {
+  // Dynamically load PDF.js if not already loaded
+  if (!window.pdfjsLib) {
+    await new Promise((res, rej) => {
+      const s = document.createElement("script");
+      s.src = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
+      s.onload = res; s.onerror = () => rej(new Error("Nepodarilo sa načítať PDF.js knižnicu"));
+      document.head.appendChild(s);
+    });
+    window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+      "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+  }
+
+  const arrayBuffer = await file.arrayBuffer();
+  const pdf = await window.pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  const totalPages = pdf.numPages;
+  let fullText = "";
+
+  for (let i = 1; i <= totalPages; i++) {
+    if (onProgress) onProgress(`Čítam stranu ${i} / ${totalPages}…`);
+    const page = await pdf.getPage(i);
+    const tc = await page.getTextContent();
+    const pageText = tc.items.map(item => item.str).join(" ");
+    fullText += `\n--- Strana ${i} ---\n${pageText}`;
+    // Safety cap: ~300k chars is plenty for accounting journals
+    if (fullText.length > 300_000) {
+      fullText += "\n[Dokument skrátený — ďalší obsah presiahol limit]";
+      break;
+    }
+  }
+  return { text: fullText, pages: totalPages };
+}
+
+async function callClaudeWithText(text, systemPrompt) {
+  return callClaude([{
+    role: "user",
+    content: `Tu je obsah účtovného dokumentu:\n\n${text}\n\nExtraktuj všetky účtovné záznamy. Vráť IBA JSON bez markdown. Každý záznam musí mať: date, description, debitAcc, creditAcc, amount.`
+  }], systemPrompt);
+}
+
+// Recover entries even from a truncated/broken JSON string.
+// Uses bracket-scanning to extract individual { } blocks and parses each one
+// independently — handles field-order variation and special characters correctly.
+function recoverEntries(raw) {
+  const clean = raw.replace(/```json|```/g, "").trim();
+
+  // 1. Fast path: try a normal parse first
+  try {
+    const parsed = JSON.parse(clean);
+    return { year: String(parsed.year ?? ""), entries: parsed.entries ?? [], wasRecovered: false };
+  } catch (_) {}
+
+  // 2. Extract year from anywhere in the text
+  const yearMatch = clean.match(/"year"\s*:\s*"(\d{4})"/);
+  const year = yearMatch ? yearMatch[1] : "";
+
+  // 3. Start scanning after the "entries" key to skip the outer wrapper object
+  const arrIdx = clean.indexOf('"entries"');
+  const searchFrom = arrIdx >= 0 ? arrIdx : 0;
+
+  // 4. Bracket-scan: find balanced { } blocks respecting strings + escapes
+  const entries = [];
+  let depth = 0;
+  let blockStart = -1;
+  let inString = false;
+  let esc = false;
+
+  for (let i = searchFrom; i < clean.length; i++) {
+    const ch = clean[i];
+    if (esc)               { esc = false; continue; }
+    if (ch === "\\" && inString) { esc = true;  continue; }
+    if (ch === '"')        { inString = !inString; continue; }
+    if (inString)          { continue; }
+
+    if (ch === "{") {
+      if (depth === 0) blockStart = i;
+      depth++;
+    } else if (ch === "}") {
+      depth--;
+      if (depth === 0 && blockStart >= 0) {
+        const block = clean.slice(blockStart, i + 1);
+        try {
+          const obj = JSON.parse(block);
+          // Accept any object that has the essential accounting fields
+          if (obj.date && (obj.debitAcc || obj.debit_acc) && (obj.creditAcc || obj.credit_acc)) {
+            entries.push({
+              date:        String(obj.date ?? ""),
+              description: String(obj.description ?? obj.desc ?? obj.popis ?? ""),
+              debitAcc:    String(obj.debitAcc ?? obj.debit_acc ?? obj.md ?? ""),
+              creditAcc:   String(obj.creditAcc ?? obj.credit_acc ?? obj.d ?? ""),
+              amount:      parseFloat(obj.amount ?? obj.suma ?? obj.sum ?? 0) || 0,
+            });
+          }
+        } catch (_) { /* malformed block — skip */ }
+        blockStart = -1;
+      }
+    }
+  }
+
+  if (entries.length === 0) {
+    throw new Error(
+      "Nepodarilo sa extrahovať záznamy z odpovede AI. " +
+      "Skúste menší PDF (odporúčame max. ~50 strán na jeden import)."
+    );
+  }
+  return { year, entries, wasRecovered: true };
+}
+
+const ACCT_LIST = ACCOUNT_CHART.map(a => `${a.code}: ${a.name} (${typeLabel[a.type]})`).join("\n");
+
+const PDF_SYSTEM = `Si expertný slovenský účtovník. Analyzuješ účtovné doklady a extraktuješ záznamy do štruktúrovaného JSON.
+
+Dostupné účty:\n${ACCT_LIST}
+
+Pravidlá:
+- Príjmy na bank. účet: MD 221, D 6xx
+- Výdaje z bank. účtu: MD 5xx, D 221
+- Mzdy: MD 521, D 331
+- Dane: MD 341, D 221
+- Vráť IBA validný JSON, žiadny iný text ani markdown backticks
+
+Formát: {"year":"RRRR","entries":[{"date":"RRRR-MM-DD","description":"...","debitAcc":"XXX","creditAcc":"YYY","amount":0.00}]}`;
+
+const XML_SYSTEM = `Si expertný slovenský účtovník. Analyzuješ bankový výpis v XML a konvertuješ transakcie na účtovné záznamy.
+
+Dostupné účty:\n${ACCT_LIST}
+
+Mapovanie:
+- Príjem (CRDT): MD 221, D podľa popisu (úrok→648b, tržby→602, ostatné→648)
+- Výdaj (DBIT): D 221, MD podľa popisu (mzda→521, nájom→511, mat.→501, daň→341, ostatné→501)
+- Vráť IBA validný JSON, žiadny iný text ani markdown backticks
+
+Formát: {"year":"RRRR","entries":[{"date":"RRRR-MM-DD","description":"...","debitAcc":"XXX","creditAcc":"YYY","amount":0.00}]}`;
+
+// ── Reusable UI ───────────────────────────────────────────────────────────────
+function Tag({ type }) {
+  return (
+    <span style={{
+      background: typeColor[type] + "22", color: typeColor[type],
+      border: `1px solid ${typeColor[type]}44`,
+      borderRadius: 4, padding: "1px 6px", fontSize: 11, fontWeight: 700, letterSpacing: 1
+    }}>{typeLabel[type]}</span>
+  );
+}
+
+function Modal({ title, onClose, children, wide }) {
+  return (
+    <div style={{
+      position: "fixed", inset: 0, background: "rgba(0,0,0,.8)", backdropFilter: "blur(6px)",
+      display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 20
+    }} onClick={onClose}>
+      <div onClick={e => e.stopPropagation()} style={{
+        background: "#111827", border: "1px solid #374151", borderRadius: 16,
+        padding: 32, width: wide ? "min(900px,96vw)" : "min(560px,96vw)",
+        maxHeight: "92vh", overflowY: "auto",
+        boxShadow: "0 30px 80px rgba(0,0,0,.85)"
+      }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 24 }}>
+          <span style={{ fontFamily: "'Playfair Display',serif", fontSize: 20, color: "#f9fafb" }}>{title}</span>
+          <button onClick={onClose} style={{ background: "none", border: "none", color: "#9ca3af", cursor: "pointer", fontSize: 24, lineHeight: 1 }}>×</button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function DropZone({ accept, onFile, label, sublabel, icon, color }) {
+  const ref = useRef();
+  const [drag, setDrag] = useState(false);
+  const handle = (f) => { if (f) onFile(f); };
+  return (
+    <div onClick={() => ref.current.click()}
+      onDragOver={e => { e.preventDefault(); setDrag(true); }}
+      onDragLeave={() => setDrag(false)}
+      onDrop={e => { e.preventDefault(); setDrag(false); handle(e.dataTransfer.files[0]); }}
+      style={{
+        border: `2px dashed ${drag ? color : "#374151"}`,
+        borderRadius: 14, padding: "36px 20px", textAlign: "center",
+        cursor: "pointer", transition: "all .2s",
+        background: drag ? color + "11" : "#0d1117",
+      }}>
+      <input ref={ref} type="file" accept={accept} style={{ display: "none" }} onChange={e => handle(e.target.files[0])} />
+      <div style={{ fontSize: 44, marginBottom: 12 }}>{icon}</div>
+      <div style={{ color: "#e5e7eb", fontSize: 14, fontWeight: 600, marginBottom: 4 }}>{label}</div>
+      <div style={{ color: "#4b5563", fontSize: 12 }}>{sublabel || "Kliknite alebo presuňte súbor sem"}</div>
+    </div>
+  );
+}
+
+function Spinner({ color = "#10b981" }) {
+  return (
+    <div style={{ textAlign: "center", padding: "50px 0" }}>
+      <div style={{ fontSize: 52, marginBottom: 20, animation: "spin 2s linear infinite", display: "inline-block" }}>⚙️</div>
+      <style>{`@keyframes spin{to{transform:rotate(360deg)}} @keyframes bar{0%{transform:translateX(-100%)}100%{transform:translateX(350%)}}`}</style>
+      <div style={{ height: 3, background: "#1f2937", borderRadius: 2, overflow: "hidden", width: "60%", margin: "0 auto" }}>
+        <div style={{ height: "100%", background: `linear-gradient(90deg, ${color}, #818cf8)`, animation: "bar 1.4s infinite", width: "45%" }} />
+      </div>
+    </div>
+  );
+}
+
+function PreviewTable({ entries, selected, onToggle, onToggleAll }) {
+  const all = entries.length > 0 && entries.every((_, i) => selected[i]);
+  return (
+    <div style={{ borderRadius: 10, overflow: "hidden", border: "1px solid #1f2937", maxHeight: 360, overflowY: "auto" }}>
+      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+        <thead style={{ background: "#0a0e18", position: "sticky", top: 0, zIndex: 1 }}>
+          <tr>
+            <th style={{ padding: "9px 10px", textAlign: "center", borderBottom: "1px solid #1f2937" }}>
+              <input type="checkbox" checked={all} onChange={() => onToggleAll(!all)} />
+            </th>
+            {["Dátum","Popis","MD","D","Suma €"].map(h => (
+              <th key={h} style={{ padding: "9px 10px", color: "#6b7280", textAlign: "left", fontWeight: 600, fontSize: 11, letterSpacing: 0.8, textTransform: "uppercase", borderBottom: "1px solid #1f2937" }}>{h}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {entries.map((e, i) => (
+            <tr key={i} style={{ opacity: selected[i] ? 1 : 0.3, transition: "opacity .15s" }}>
+              <td style={{ padding: "7px 10px", textAlign: "center", borderBottom: "1px solid #0d1117" }}>
+                <input type="checkbox" checked={!!selected[i]} onChange={() => onToggle(i)} />
+              </td>
+              <td style={{ padding: "7px 10px", color: "#9ca3af", borderBottom: "1px solid #0d1117", whiteSpace: "nowrap" }}>{e.date}</td>
+              <td style={{ padding: "7px 10px", color: "#e5e7eb", borderBottom: "1px solid #0d1117", maxWidth: 260, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={e.description}>{e.description}</td>
+              <td style={{ padding: "7px 10px", color: "#4ade80", borderBottom: "1px solid #0d1117", fontWeight: 600 }}>{e.debitAcc}</td>
+              <td style={{ padding: "7px 10px", color: "#f472b6", borderBottom: "1px solid #0d1117", fontWeight: 600 }}>{e.creditAcc}</td>
+              <td style={{ padding: "7px 10px", color: "#10b981", fontWeight: 700, textAlign: "right", borderBottom: "1px solid #0d1117", whiteSpace: "nowrap" }}>{fmt(e.amount)}</td>
+            </tr>
+          ))}
+          {entries.length === 0 && (
+            <tr><td colSpan={6} style={{ padding: 30, textAlign: "center", color: "#4b5563" }}>Žiadne záznamy</td></tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+// ── PDF IMPORT MODAL ──────────────────────────────────────────────────────────
+
+// ── OCR Doklad Modal ─────────────────────────────────────────────────────────
+function OcrModal({ onClose, onConfirm, inp, btn, year }) {
+  const [stage, setStage] = useState("capture"); // capture | processing | review
+  const [imgB64, setImgB64] = useState(null);
+  const [imgPreview, setImgPreview] = useState(null);
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState("");
+  const [form, setForm] = useState({ date: "", description: "", debitAcc: "", creditAcc: "", amount: "" });
+  const fileRef = useRef(null);
+
+  const ACCOUNTS_LIST = ACCOUNT_CHART.map(a => `${a.code} – ${a.name}`).join("\n");
+
+  const handleFile = (file) => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const dataUrl = e.target.result;
+      const b64 = dataUrl.split(",")[1];
+      setImgB64(b64);
+      setImgPreview(dataUrl);
+      setStage("processing");
+      processImage(b64);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const processImage = async (b64) => {
+    setError("");
+    try {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 1000,
+          system: `Si účtovný asistent pre slovenské podvojné účtovníctvo. 
+Z odfoteného dokladu (faktúra, pokladničný doklad, výpis) extrahuj účtovný zápis.
+Dostupné účty:
+${ACCOUNTS_LIST}
+
+Odpovedz VÝLUČNE JSON objektom (bez markdown, bez textu navyše):
+{
+  "date": "YYYY-MM-DD",
+  "description": "stručný popis",
+  "debitAcc": "XXX",
+  "creditAcc": "XXX", 
+  "amount": 0.00,
+  "confidence": "high|medium|low",
+  "notes": "vysvetlenie alebo otázky"
+}`,
+          messages: [{
+            role: "user",
+            content: [
+              { type: "image", source: { type: "base64", media_type: "image/jpeg", data: b64 } },
+              { type: "text", text: `Aktuálny rok: ${year}. Extrahuj účtovný zápis z tohto dokladu.` }
+            ]
+          }]
+        })
+      });
+
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error?.message || "API chyba");
+
+      const text = data.content?.map(b => b.text || "").join("") || "";
+      const clean = text.replace(/```json|```/g, "").trim();
+      const parsed = JSON.parse(clean);
+
+      setResult(parsed);
+      setForm({
+        date: parsed.date || new Date().toISOString().slice(0, 10),
+        description: parsed.description || "",
+        debitAcc: parsed.debitAcc || "",
+        creditAcc: parsed.creditAcc || "",
+        amount: parsed.amount ? String(parsed.amount) : "",
+      });
+      setStage("review");
+    } catch (e) {
+      setError("Chyba OCR: " + e.message);
+      setStage("capture");
+    }
+  };
+
+  const confidenceColor = { high: "#10b981", medium: "#f59e0b", low: "#f87171" };
+  const confidenceLabel = { high: "Vysoká istota", medium: "Stredná istota", low: "Nízka istota — skontrolujte" };
+
+  const sectionTitle = (t) => (
+    <div style={{ fontSize: 10, letterSpacing: 1, textTransform: "uppercase", color: "#6b7280", marginBottom: 6, marginTop: 14 }}>{t}</div>
+  );
+
+  return (
+    <Modal title="📷 OCR — Nahrať doklad" onClose={onClose}>
+      {stage === "capture" && (
+        <div>
+          <div style={{ textAlign: "center", padding: "20px 0" }}>
+            <div style={{ fontSize: 52, marginBottom: 12 }}>📄</div>
+            <div style={{ color: "#9ca3af", fontSize: 13, marginBottom: 20 }}>
+              Odfote doklad kamerou alebo vyberte obrázok z galérie.<br />
+              <span style={{ fontSize: 11, color: "#6b7280" }}>Faktúra, pokladničný doklad, výpis z účtu</span>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10, alignItems: "center" }}>
+              <button
+                onClick={() => { fileRef.current.setAttribute("capture","environment"); fileRef.current.click(); }}
+                style={{ ...btn("#7c3aed"), padding: "12px 28px", fontSize: 14, width: "100%", maxWidth: 280 }}
+              >
+                📷 Odfotiť kamerou
+              </button>
+              <button
+                onClick={() => { fileRef.current.removeAttribute("capture"); fileRef.current.click(); }}
+                style={{ ...btn("#374151"), padding: "10px 28px", fontSize: 13, width: "100%", maxWidth: 280 }}
+              >
+                🖼 Vybrať z galérie
+              </button>
+            </div>
+            <input
+              ref={fileRef}
+              type="file"
+              accept="image/*"
+              style={{ display: "none" }}
+              onChange={e => handleFile(e.target.files[0])}
+            />
+          </div>
+          {error && (
+            <div style={{ background: "#1f0d0d", border: "1px solid #7f1d1d", borderRadius: 8, padding: "10px 14px", color: "#f87171", fontSize: 12, marginTop: 8 }}>
+              {error}
+              <div style={{ marginTop: 8 }}>
+                <button onClick={() => setError("")} style={{ ...btn("#374151"), padding: "4px 12px", fontSize: 11 }}>Skúsiť znova</button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {stage === "processing" && (
+        <div style={{ textAlign: "center", padding: "30px 0" }}>
+          {imgPreview && (
+            <img src={imgPreview} alt="doklad"
+              style={{ maxWidth: "100%", maxHeight: 200, borderRadius: 8, marginBottom: 20, objectFit: "contain", border: "1px solid #1f2937" }} />
+          )}
+          <div style={{ fontSize: 32, marginBottom: 12 }}>
+            <span style={{ display: "inline-block", animation: "spin 1s linear infinite" }}>⚙️</span>
+          </div>
+          <div style={{ color: "#9ca3af", fontSize: 13 }}>Claude analyzuje doklad…</div>
+          <div style={{ color: "#6b7280", fontSize: 11, marginTop: 6 }}>Rozpoznávanie textu a kontextu</div>
+          <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
+        </div>
+      )}
+
+      {stage === "review" && result && (
+        <div>
+          <div style={{ display: "flex", gap: 10, marginBottom: 14, alignItems: "flex-start" }}>
+            {imgPreview && (
+              <img src={imgPreview} alt="doklad"
+                style={{ width: 80, height: 80, borderRadius: 6, objectFit: "cover", border: "1px solid #1f2937", flexShrink: 0 }} />
+            )}
+            <div style={{ flex: 1 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+                <span style={{ fontSize: 11, fontWeight: 700, color: confidenceColor[result.confidence] || "#9ca3af",
+                  background: (confidenceColor[result.confidence] || "#9ca3af") + "22",
+                  padding: "3px 8px", borderRadius: 4 }}>
+                  ● {confidenceLabel[result.confidence] || result.confidence}
+                </span>
+              </div>
+              {result.notes && (
+                <div style={{ fontSize: 11, color: "#9ca3af", fontStyle: "italic", lineHeight: 1.4 }}>{result.notes}</div>
+              )}
+            </div>
+          </div>
+
+          {sectionTitle("Skontrolujte a upravte pred uložením")}
+
+          {[{ label: "Dátum", key: "date", type: "date" },
+            { label: "Popis", key: "description", type: "text", placeholder: "Popis operácie" }
+          ].map(f => (
+            <div key={f.key} style={{ marginBottom: 12 }}>
+              <label style={{ display: "block", fontSize: 10, color: "#6b7280", marginBottom: 3, letterSpacing: 1, textTransform: "uppercase" }}>{f.label}</label>
+              <input type={f.type} value={form[f.key]} placeholder={f.placeholder}
+                onChange={e => setForm(x => ({ ...x, [f.key]: e.target.value }))} style={inp} />
+            </div>
+          ))}
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 12 }}>
+            {[{ label: "MD účet", key: "debitAcc", color: "#4ade80" },
+              { label: "D účet", key: "creditAcc", color: "#f472b6" }
+            ].map(f => (
+              <div key={f.key}>
+                <label style={{ display: "block", fontSize: 10, color: f.color, marginBottom: 3, letterSpacing: 1, textTransform: "uppercase" }}>{f.label}</label>
+                <select value={form[f.key]} onChange={e => setForm(x => ({ ...x, [f.key]: e.target.value }))} style={inp}>
+                  <option value="">— vybrať —</option>
+                  {ACCOUNT_CHART.map(a => <option key={a.code} value={a.code}>{a.code} – {a.name}</option>)}
+                </select>
+              </div>
+            ))}
+          </div>
+
+          <div style={{ marginBottom: 16 }}>
+            <label style={{ display: "block", fontSize: 10, color: "#6b7280", marginBottom: 3, letterSpacing: 1, textTransform: "uppercase" }}>Suma (€)</label>
+            <input type="number" value={form.amount} placeholder="0.00"
+              onChange={e => setForm(x => ({ ...x, amount: e.target.value }))} style={inp} />
+          </div>
+
+          <div style={{ display: "flex", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+            <button onClick={() => { setStage("capture"); setImgB64(null); setImgPreview(null); }}
+              style={{ ...btn("#374151"), fontSize: 12 }}>← Nový doklad</button>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={onClose} style={{ ...btn("#374151"), fontSize: 12 }}>Zrušiť</button>
+              <button
+                onClick={() => {
+                  if (!form.date || !form.debitAcc || !form.creditAcc || !form.amount) {
+                    alert("Vyplňte všetky povinné polia"); return;
+                  }
+                  onConfirm(form);
+                }}
+                style={{ ...btn("#7c3aed"), fontSize: 12 }}
+              >
+                ✓ Použiť zápis
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+function PdfImportModal({ onClose, onImport, inp, btn }) {
+  const [stage, setStage] = useState("upload");
+  const [error, setError] = useState("");
+  const [preview, setPreview] = useState(null);
+  const [selected, setSelected] = useState({});
+  const [targetYear, setTargetYear] = useState("");
+  const [recovered, setRecovered] = useState(false);
+  const [processLog, setProcessLog] = useState("Čítam PDF súbor…");
+
+  const process = async (file) => {
+    setStage("processing");
+    setRecovered(false);
+    setProcessLog("Inicializujem PDF knižnicu…");
+    try {
+      // Step 1: Extract text from PDF using PDF.js (no base64 transfer!)
+      const { text, pages } = await extractPdfText(file, (msg) => setProcessLog(msg));
+
+      if (!text.trim()) {
+        throw new Error("PDF neobsahuje čitateľný text. Možno je to naskenovaný obrázok bez OCR vrstvy.");
+      }
+
+      setProcessLog(`Extrahovalo sa ${pages} strán textu. Analyzujem s AI…`);
+
+      // Step 2: Send extracted text to Claude (much smaller than base64 PDF)
+      const CHUNK = 120_000; // ~120k chars per request is safe
+      let allEntries = [];
+      let detectedYear = "";
+      let wasRecov = false;
+
+      if (text.length <= CHUNK) {
+        // Single request
+        const raw = await callClaudeWithText(text, PDF_SYSTEM);
+        const result = recoverEntries(raw);
+        allEntries = result.entries;
+        detectedYear = result.year;
+        wasRecov = result.wasRecovered ?? false;
+      } else {
+        // Split into chunks for very long documents
+        const chunks = [];
+        for (let i = 0; i < text.length; i += CHUNK) chunks.push(text.slice(i, i + CHUNK));
+        for (let ci = 0; ci < chunks.length; ci++) {
+          setProcessLog(`AI analyzuje časť ${ci + 1} / ${chunks.length}…`);
+          try {
+            const raw = await callClaudeWithText(chunks[ci], PDF_SYSTEM);
+            const result = recoverEntries(raw);
+            // Deduplicate
+            const seen = new Set(allEntries.map(e => `${e.date}|${e.description}|${e.amount}`));
+            const fresh = result.entries.filter(e => !seen.has(`${e.date}|${e.description}|${e.amount}`));
+            allEntries.push(...fresh);
+            if (!detectedYear && result.year) detectedYear = result.year;
+            if (result.wasRecovered) wasRecov = true;
+          } catch (_) { /* skip failed chunk, continue */ }
+        }
+        wasRecov = chunks.length > 1;
+      }
+
+      if (allEntries.length === 0) {
+        throw new Error("AI nenašla žiadne účtovné záznamy v dokumente. Uistite sa, že PDF obsahuje účtovný denník alebo podobný výkaz.");
+      }
+
+      const entries = allEntries.map(e => ({ ...e, amount: parseFloat(e.amount) || 0 }));
+      if (wasRecov) setRecovered(true);
+      setPreview({ entries });
+      setTargetYear(detectedYear);
+      setSelected(Object.fromEntries(entries.map((_, i) => [i, true])));
+      setStage("preview");
+    } catch (e) {
+      setError(e.message);
+      setStage("error");
+    }
+  };
+
+  const confirm = () => {
+    if (!targetYear) return;
+    const sel = preview.entries
+      .filter((_, i) => selected[i])
+      .map(e => ({ id: Date.now() + Math.random(), ...e }));
+    onImport(targetYear, sel);
+  };
+
+  return (
+    <Modal title="📄 Import z PDF dokumentu" onClose={onClose} wide>
+      {stage === "upload" && (
+        <div>
+          <div style={{ marginBottom: 20, padding: 14, background: "#0d1117", borderRadius: 10, fontSize: 13, color: "#9ca3af", lineHeight: 1.8 }}>
+            Nahrajte <strong style={{ color: "#f9fafb" }}>PDF účtovný výkaz</strong> z minulých rokov.
+            AI automaticky rozozná a extraktuje záznamy z denníka, hlavnej knihy alebo iných účtovných výstupov.
+          </div>
+          <DropZone
+            accept=".pdf"
+            onFile={process}
+            label="Presuňte PDF sem alebo kliknite pre výber"
+            sublabel="Podporované: výpisy z Pohody, Money S3, OMEGA, KROS, vlastné PDF"
+            icon="📄"
+            color="#f59e0b"
+          />
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 10, marginTop: 16 }}>
+            {[
+              { icon: "🗂", label: "Účtovný denník", desc: "Zoznamy účtovných zápisov" },
+              { icon: "📚", label: "Hlavná kniha", desc: "Obraty a zostatky účtov" },
+              { icon: "📋", label: "Súvaha / Výsledovka", desc: "Ročné výkazy" },
+            ].map(c => (
+              <div key={c.label} style={{ padding: 12, background: "#0d1117", borderRadius: 8, border: "1px solid #1f2937", textAlign: "center" }}>
+                <div style={{ fontSize: 22, marginBottom: 6 }}>{c.icon}</div>
+                <div style={{ fontSize: 12, color: "#e5e7eb", fontWeight: 600 }}>{c.label}</div>
+                <div style={{ fontSize: 11, color: "#4b5563", marginTop: 3 }}>{c.desc}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {stage === "processing" && (
+        <div>
+          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 18, textAlign: "center", marginBottom: 8 }}>AI analyzuje dokument…</div>
+          <div style={{ color: "#6b7280", fontSize: 13, textAlign: "center", marginBottom: 24 }}>{processLog}</div>
+          <Spinner color="#f59e0b" />
+          <div style={{ textAlign: "center", marginTop: 20, fontSize: 11, color: "#374151" }}>
+            Veľké PDF (100+ strán) môže trvať 30–60 sekúnd
+          </div>
+        </div>
+      )}
+
+      {stage === "error" && (
+        <div style={{ textAlign: "center", padding: "20px 0" }}>
+          <div style={{ fontSize: 48, marginBottom: 16 }}>⚠️</div>
+          <div style={{ color: "#f87171", marginBottom: 12, fontSize: 15, fontWeight: 700 }}>Chyba pri spracovaní</div>
+          <div style={{ color: "#9ca3af", fontSize: 13, marginBottom: 16, background: "#0d1117", padding: "10px 14px", borderRadius: 8, border: "1px solid #1f2937", textAlign: "left", wordBreak: "break-word" }}>{error}</div>
+          <div style={{ fontSize: 12, color: "#4b5563", marginBottom: 20 }}>
+            Tipy: PDF nesmie byť zaheslované · Max. odporúčaná veľkosť ~10 MB · Naskenované PDF bez OCR nemusí fungovať
+          </div>
+          <button onClick={() => { setStage("upload"); setError(""); }} style={btn("#374151")}>← Skúsiť znova</button>
+        </div>
+      )}
+
+      {stage === "preview" && preview && (
+        <div>
+          {recovered && (
+            <div style={{ marginBottom: 14, padding: "10px 14px", background: "#f59e0b11", border: "1px solid #f59e0b55", borderRadius: 8, fontSize: 12, color: "#f59e0b", display: "flex", gap: 8 }}>
+              <span style={{ flexShrink: 0 }}>⚠</span>
+              <span>Odpoveď AI bola skrátená — záznamy boli čiastočne obnovené ({preview.entries.length} ks). Overte, či nechýbajú položky. Pre veľké PDF odporúčame rozdeliť súbor na menšie časti.</span>
+            </div>
+          )}
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14, flexWrap: "wrap", gap: 10 }}>
+            <div style={{ fontSize: 14, color: "#9ca3af" }}>
+              AI extraktovala <strong style={{ color: "#f59e0b" }}>{preview.entries.length}</strong> záznamov.
+              Odznačte záznamy, ktoré nechcete importovať.
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ fontSize: 12, color: "#6b7280" }}>Importovať do roku:</span>
+              <input value={targetYear} onChange={e => setTargetYear(e.target.value)}
+                placeholder="napr. 2023" style={{ ...inp, width: 100, padding: "6px 10px", fontSize: 13 }} />
+            </div>
+          </div>
+          <PreviewTable entries={preview.entries} selected={selected}
+            onToggle={i => setSelected(s => ({ ...s, [i]: !s[i] }))}
+            onToggleAll={v => setSelected(Object.fromEntries(preview.entries.map((_, i) => [i, v])))} />
+          <div style={{ marginTop: 10, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span style={{ fontSize: 11, color: "#6b7280" }}>
+              Vybrané: <strong style={{ color: "#f59e0b" }}>{Object.values(selected).filter(Boolean).length}</strong> / {preview.entries.length}
+            </span>
+            <div style={{ display: "flex", gap: 10 }}>
+              <button onClick={onClose} style={btn("#374151")}>Zrušiť</button>
+              <button onClick={confirm} style={{ ...btn("#f59e0b"), opacity: (!targetYear || Object.values(selected).every(v => !v)) ? 0.4 : 1 }}>
+                ✓ Importovať ({Object.values(selected).filter(Boolean).length})
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+// ── XML IMPORT MODAL ──────────────────────────────────────────────────────────
+function XmlImportModal({ onClose, onImport, inp, btn }) {
+  const [stage, setStage] = useState("upload");
+  const [error, setError] = useState("");
+  const [preview, setPreview] = useState(null);
+  const [selected, setSelected] = useState({});
+  const [targetYear, setTargetYear] = useState("");
+  const [useAi, setUseAi] = useState(true);
+
+  const parseXmlFallback = (xmlText) => {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(xmlText, "text/xml");
+    const entries = [];
+
+    // CAMT.053 / ISO 20022
+    const txNodes = doc.querySelectorAll("Ntry");
+    txNodes.forEach(node => {
+      const amtEl = node.querySelector("Amt");
+      const amt = parseFloat(amtEl?.textContent ?? "0");
+      const cd = node.querySelector("CdtDbtInd")?.textContent?.trim();
+      const dateRaw = node.querySelector("ValDt Dt")?.textContent
+        ?? node.querySelector("BookgDt Dt")?.textContent ?? "";
+      const desc = node.querySelector("AddtlNtryInf")?.textContent?.trim()
+        ?? node.querySelector("Ustrd")?.textContent?.trim()
+        ?? node.querySelector("RmtInf Ustrd")?.textContent?.trim()
+        ?? "Bankový pohyb";
+      if (!amt || !dateRaw) return;
+      const isCredit = cd === "CRDT";
+      entries.push({
+        date: dateRaw.slice(0, 10),
+        description: desc.slice(0, 80),
+        debitAcc: isCredit ? "221" : "501",
+        creditAcc: isCredit ? "602" : "221",
+        amount: Math.abs(amt)
+      });
+    });
+
+    // Generic fallback
+    if (entries.length === 0) {
+      doc.querySelectorAll("transaction, pohyb, entry, txn").forEach(r => {
+        const amt = r.querySelector("[tag*='amount' i], amount, suma, Amt")?.textContent;
+        if (amt && parseFloat(amt)) {
+          entries.push({
+            date: today(),
+            description: r.querySelector("description, popis, desc, name")?.textContent?.slice(0, 80) ?? "Import",
+            debitAcc: "221", creditAcc: "602",
+            amount: Math.abs(parseFloat(amt.replace(",", ".")))
+          });
+        }
+      });
+    }
+    return entries;
+  };
+
+  const process = async (file) => {
+    setStage("processing");
+    try {
+      const xmlText = await file.text();
+      let entries = [];
+      let year = "";
+
+      if (useAi) {
+        const raw = await callClaude([{
+          role: "user",
+          content: `Bankový výpis v XML (max. 30 000 znakov):\n\n${xmlText.slice(0, 30000)}\n\nExtraktuj všetky transakcie. Vráť IBA JSON. Každý záznam musí mať polia: date, description, debitAcc, creditAcc, amount.`
+        }], XML_SYSTEM);
+        const recovered = recoverEntries(raw);
+        entries = recovered.entries.map(e => ({ ...e, amount: parseFloat(e.amount) || 0 }));
+        year = recovered.year;
+      } else {
+        entries = parseXmlFallback(xmlText);
+        year = entries[0]?.date?.slice(0, 4) ?? "";
+      }
+
+      setPreview({ entries });
+      setTargetYear(year);
+      setSelected(Object.fromEntries(entries.map((_, i) => [i, true])));
+      setStage("preview");
+    } catch (e) {
+      setError(e.message);
+      setStage("error");
+    }
+  };
+
+  const confirm = () => {
+    if (!targetYear) return;
+    const sel = preview.entries
+      .filter((_, i) => selected[i])
+      .map(e => ({ id: Date.now() + Math.random(), ...e }));
+    onImport(targetYear, sel);
+  };
+
+  return (
+    <Modal title="🏦 Import bankového výpisu (XML)" onClose={onClose} wide>
+      {stage === "upload" && (
+        <div>
+          <div style={{ marginBottom: 20, padding: 14, background: "#0d1117", borderRadius: 10, fontSize: 13, color: "#9ca3af", lineHeight: 1.8 }}>
+            Nahrajte <strong style={{ color: "#f9fafb" }}>bankový výpis vo formáte XML</strong>.
+            Automaticky sa rozpozná formát CAMT.053, ISO 20022 alebo vlastný XML formát banky.
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 16, padding: "12px 16px", background: "#0d1117", borderRadius: 10, border: "1px solid #1f2937" }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 13 }}>
+              <input type="checkbox" checked={useAi} onChange={e => setUseAi(e.target.checked)}
+                style={{ width: 16, height: 16, accentColor: "#6366f1" }} />
+              <span style={{ color: "#e5e7eb" }}>Použiť AI interpretáciu</span>
+            </label>
+            <span style={{ fontSize: 11, color: "#4b5563" }}>— presnejšia klasifikácia na účty, pomalšia</span>
+            {!useAi && <span style={{ fontSize: 11, color: "#f59e0b", marginLeft: "auto" }}>⚠ Rýchly parser (len štandardné CAMT)</span>}
+          </div>
+          <DropZone
+            accept=".xml,.camt,.xls"
+            onFile={process}
+            label="Presuňte XML výpis sem alebo kliknite pre výber"
+            sublabel="CAMT.053, ISO 20022, SLSP, VÚB, Tatra banka, ČSOB, UniCredit"
+            icon="🏦"
+            color="#6366f1"
+          />
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 16 }}>
+            {[
+              { icon: "🏛", label: "CAMT.053", desc: "Európsky štandard ISO 20022" },
+              { icon: "🏢", label: "Slovenské banky", desc: "SLSP, VÚB, Tatra, ČSOB, OTP" },
+            ].map(c => (
+              <div key={c.label} style={{ padding: 12, background: "#0d1117", borderRadius: 8, border: "1px solid #1f2937", display: "flex", alignItems: "center", gap: 12 }}>
+                <span style={{ fontSize: 28 }}>{c.icon}</span>
+                <div>
+                  <div style={{ fontSize: 13, color: "#e5e7eb", fontWeight: 600 }}>{c.label}</div>
+                  <div style={{ fontSize: 11, color: "#4b5563", marginTop: 2 }}>{c.desc}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {stage === "processing" && (
+        <div>
+          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 18, textAlign: "center", marginBottom: 8 }}>
+            {useAi ? "AI klasifikuje transakcie…" : "Parsovanie XML…"}
+          </div>
+          <div style={{ color: "#6b7280", fontSize: 13, textAlign: "center", marginBottom: 24 }}>
+            {useAi ? "Mapujem bankové pohyby na účtovné účty…" : "Čítam štruktúru CAMT.053…"}
+          </div>
+          <Spinner color="#6366f1" />
+        </div>
+      )}
+
+      {stage === "error" && (
+        <div style={{ textAlign: "center", padding: "30px 0" }}>
+          <div style={{ fontSize: 48, marginBottom: 16 }}>⚠️</div>
+          <div style={{ color: "#f87171", marginBottom: 8, fontSize: 15 }}>Chyba pri spracovaní</div>
+          <div style={{ color: "#6b7280", fontSize: 13, marginBottom: 24 }}>{error}</div>
+          <div style={{ display: "flex", gap: 10, justifyContent: "center" }}>
+            <button onClick={() => { setStage("upload"); setError(""); }} style={btn("#374151")}>← Späť</button>
+            {useAi && <button onClick={() => { setUseAi(false); setStage("upload"); setError(""); }} style={btn("#f59e0b")}>Skúsiť bez AI</button>}
+          </div>
+        </div>
+      )}
+
+      {stage === "preview" && preview && (
+        <div>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14, flexWrap: "wrap", gap: 10 }}>
+            <div style={{ fontSize: 14, color: "#9ca3af" }}>
+              Nájdených <strong style={{ color: "#6366f1" }}>{preview.entries.length}</strong> transakcií.
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ fontSize: 12, color: "#6b7280" }}>Importovať do roku:</span>
+              <input value={targetYear} onChange={e => setTargetYear(e.target.value)}
+                placeholder="napr. 2024" style={{ ...inp, width: 100, padding: "6px 10px", fontSize: 13 }} />
+            </div>
+          </div>
+          <PreviewTable entries={preview.entries} selected={selected}
+            onToggle={i => setSelected(s => ({ ...s, [i]: !s[i] }))}
+            onToggleAll={v => setSelected(Object.fromEntries(preview.entries.map((_, i) => [i, v])))} />
+          <div style={{ marginTop: 10, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <span style={{ fontSize: 11, color: "#6b7280" }}>
+              Vybrané: <strong style={{ color: "#6366f1" }}>{Object.values(selected).filter(Boolean).length}</strong> / {preview.entries.length}
+            </span>
+            <div style={{ display: "flex", gap: 10 }}>
+              <button onClick={onClose} style={btn("#374151")}>Zrušiť</button>
+              <button onClick={confirm} style={{ ...btn("#6366f1"), opacity: (!targetYear || Object.values(selected).every(v => !v)) ? 0.4 : 1 }}>
+                ✓ Importovať ({Object.values(selected).filter(Boolean).length})
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+// ── MAIN APP ──────────────────────────────────────────────────────────────────
+const SEED_DATA = {"year":"2024","entries":[{"id":1,"date":"2024-01-01","description":"Výsledok hospodárenia","debitAcc":"431","creditAcc":"428","amount":25879.12},{"id":2,"date":"2024-01-01","description":"Prechod z minulého roka","debitAcc":"211","creditAcc":"701","amount":10500.39},{"id":3,"date":"2024-01-01","description":"Prechod z minulého roka","debitAcc":"221","creditAcc":"701","amount":8007.83},{"id":4,"date":"2024-01-01","description":"Prechod z minulého roka","debitAcc":"311","creditAcc":"701","amount":15064.0},{"id":5,"date":"2024-01-01","description":"Prechod z minulého roka","debitAcc":"701","creditAcc":"341","amount":2693.1},{"id":6,"date":"2024-01-01","description":"Prechod z minulého roka","debitAcc":"701","creditAcc":"411","amount":5000.0},{"id":7,"date":"2024-01-01","description":"Prechod z minulého roka","debitAcc":"701","creditAcc":"431","amount":10618.23},{"id":8,"date":"2024-01-01","description":"Výsledok hospodárenia min. roka","debitAcc":"701","creditAcc":"431","amount":15260.89},{"id":9,"date":"2024-01-02","description":"Výpomoc konateľa","debitAcc":"249","creditAcc":"221","amount":6450.0},{"id":10,"date":"2024-01-03","description":"Predplatné časopisov - N Press","debitAcc":"518","creditAcc":"321","amount":6.99},{"id":11,"date":"2024-01-03","description":"Telefón, internet - Orange","debitAcc":"518","creditAcc":"321","amount":51.86},{"id":12,"date":"2024-01-04","description":"Úhrada faktúry DF-20240001 N Press","debitAcc":"321","creditAcc":"221","amount":6.99},{"id":13,"date":"2024-01-05","description":"Leasing 1/24 - ALD Automotive","debitAcc":"518","creditAcc":"321","amount":447.76},{"id":14,"date":"2024-01-06","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":73.86},{"id":15,"date":"2024-01-08","description":"Inkaso faktúry 20230012","debitAcc":"221","creditAcc":"311","amount":400.0},{"id":16,"date":"2024-01-08","description":"Inkaso faktúry 20230013","debitAcc":"221","creditAcc":"311","amount":900.0},{"id":17,"date":"2024-01-08","description":"Inkaso faktúry 20230014","debitAcc":"221","creditAcc":"311","amount":3764.0},{"id":18,"date":"2024-01-14","description":"Kancelárske potreby - Alza.sk","debitAcc":"501","creditAcc":"321","amount":6.57},{"id":19,"date":"2024-01-14","description":"Úhrada faktúry ALD Automotive","debitAcc":"321","creditAcc":"221","amount":447.76},{"id":20,"date":"2024-01-14","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":21.22},{"id":21,"date":"2024-01-15","description":"Úhrada faktúry Alza.sk","debitAcc":"321","creditAcc":"221","amount":6.57},{"id":22,"date":"2024-01-15","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":557.0},{"id":23,"date":"2024-01-16","description":"Úhrada faktúry Orange","debitAcc":"321","creditAcc":"221","amount":51.86},{"id":24,"date":"2024-01-29","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":678.0},{"id":25,"date":"2024-01-31","description":"Ekonomické poradenstvo - REINS INVEST","debitAcc":"311","creditAcc":"602","amount":900.0},{"id":26,"date":"2024-01-31","description":"Bankové poplatky","debitAcc":"568","creditAcc":"221","amount":8.0},{"id":27,"date":"2024-02-03","description":"Telefón, internet - Orange","debitAcc":"518","creditAcc":"321","amount":50.58},{"id":28,"date":"2024-02-03","description":"Predplatné časopisov - N Press","debitAcc":"518","creditAcc":"321","amount":6.99},{"id":29,"date":"2024-02-04","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":6.49},{"id":30,"date":"2024-02-04","description":"Úhrada faktúry N Press","debitAcc":"321","creditAcc":"221","amount":6.99},{"id":31,"date":"2024-02-07","description":"Inkaso faktúry 20240001 REINS","debitAcc":"221","creditAcc":"311","amount":900.0},{"id":32,"date":"2024-02-08","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":76.22},{"id":33,"date":"2024-02-09","description":"Leasing 2/24 - ALD Automotive","debitAcc":"518","creditAcc":"321","amount":447.76},{"id":34,"date":"2024-02-09","description":"Úhrada faktúry ALD Automotive","debitAcc":"321","creditAcc":"221","amount":447.76},{"id":35,"date":"2024-02-14","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":49.8},{"id":36,"date":"2024-02-16","description":"Úhrada faktúry Orange","debitAcc":"321","creditAcc":"221","amount":50.58},{"id":37,"date":"2024-02-20","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":76.83},{"id":38,"date":"2024-02-29","description":"Ekonomické poradenstvo - REINS INVEST","debitAcc":"311","creditAcc":"602","amount":900.0},{"id":39,"date":"2024-02-29","description":"Bankové poplatky","debitAcc":"568","creditAcc":"221","amount":8.0},{"id":40,"date":"2024-03-03","description":"Telefón, internet - Orange","debitAcc":"518","creditAcc":"321","amount":48.87},{"id":41,"date":"2024-03-05","description":"Predplatné časopisov - N Press","debitAcc":"518","creditAcc":"321","amount":6.99},{"id":42,"date":"2024-03-06","description":"Ostatné služby","debitAcc":"518","creditAcc":"221","amount":0.5},{"id":43,"date":"2024-03-06","description":"Ostatné služby","debitAcc":"518","creditAcc":"221","amount":0.5},{"id":44,"date":"2024-03-06","description":"Úhrada faktúry N Press","debitAcc":"321","creditAcc":"221","amount":6.99},{"id":45,"date":"2024-03-07","description":"Inkaso faktúry 20240002 REINS","debitAcc":"221","creditAcc":"311","amount":900.0},{"id":46,"date":"2024-03-13","description":"Výpomoc konateľa","debitAcc":"249","creditAcc":"221","amount":1500.0},{"id":47,"date":"2024-03-14","description":"Leasing 3/24 - ALD Automotive","debitAcc":"518","creditAcc":"321","amount":448.32},{"id":48,"date":"2024-03-15","description":"Prevádzkový materiál","debitAcc":"501","creditAcc":"211","amount":9.47},{"id":49,"date":"2024-03-18","description":"Výpomoc konateľa","debitAcc":"249","creditAcc":"221","amount":3700.0},{"id":50,"date":"2024-03-19","description":"Úhrada faktúry Orange","debitAcc":"321","creditAcc":"221","amount":48.87},{"id":51,"date":"2024-03-27","description":"Úhrada faktúry ALD Automotive","debitAcc":"321","creditAcc":"221","amount":448.32},{"id":52,"date":"2024-03-27","description":"Vrátenie výpomoci konateľa","debitAcc":"221","creditAcc":"249","amount":3700.0},{"id":53,"date":"2024-03-27","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":83.07},{"id":54,"date":"2024-03-27","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":4.5},{"id":55,"date":"2024-03-30","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":36.7},{"id":56,"date":"2024-03-31","description":"Ekonomické poradenstvo - REINS INVEST","debitAcc":"311","creditAcc":"602","amount":900.0},{"id":57,"date":"2024-03-31","description":"Bankové poplatky","debitAcc":"568","creditAcc":"221","amount":8.0},{"id":58,"date":"2024-04-01","description":"Úhrada faktúry Národná diaľničná","debitAcc":"321","creditAcc":"221","amount":60.0},{"id":59,"date":"2024-04-01","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":79.03},{"id":60,"date":"2024-04-02","description":"Prevádzkový materiál","debitAcc":"501","creditAcc":"325","amount":1685.0},{"id":61,"date":"2024-04-02","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":1685.0},{"id":62,"date":"2024-04-03","description":"Diaľničné poplatky","debitAcc":"518","creditAcc":"321","amount":60.0},{"id":63,"date":"2024-04-03","description":"Telefón, internet - Orange","debitAcc":"518","creditAcc":"321","amount":49.56},{"id":64,"date":"2024-04-05","description":"Predplatné časopisov - N Press","debitAcc":"518","creditAcc":"321","amount":6.99},{"id":65,"date":"2024-04-05","description":"Ostatné služby - Anton Kráľ","debitAcc":"518","creditAcc":"211","amount":25.0},{"id":66,"date":"2024-04-06","description":"Úhrada faktúry N Press","debitAcc":"321","creditAcc":"221","amount":6.99},{"id":67,"date":"2024-04-08","description":"Leasing 4/24 - ALD Automotive","debitAcc":"518","creditAcc":"321","amount":448.32},{"id":68,"date":"2024-04-08","description":"Inkaso faktúry 20240003 REINS","debitAcc":"221","creditAcc":"311","amount":900.0},{"id":69,"date":"2024-04-09","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":17.9},{"id":70,"date":"2024-04-11","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":47.56},{"id":71,"date":"2024-04-11","description":"Bankové poplatky","debitAcc":"568","creditAcc":"221","amount":0.95},{"id":72,"date":"2024-04-11","description":"Výpomoc konateľa","debitAcc":"249","creditAcc":"221","amount":2500.0},{"id":73,"date":"2024-04-11","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":37.0},{"id":74,"date":"2024-04-11","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":22.0},{"id":75,"date":"2024-04-11","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":81.41},{"id":76,"date":"2024-04-12","description":"Vrátenie výpomoci konateľa","debitAcc":"221","creditAcc":"249","amount":1000.0},{"id":77,"date":"2024-04-12","description":"Vrátenie výpomoci konateľa","debitAcc":"221","creditAcc":"249","amount":2500.0},{"id":78,"date":"2024-04-13","description":"Dotácia pokladnice","debitAcc":"211","creditAcc":"261","amount":1000.0},{"id":79,"date":"2024-04-13","description":"Dotácia pokladnice","debitAcc":"261","creditAcc":"221","amount":1000.0},{"id":80,"date":"2024-04-13","description":"Bankové poplatky","debitAcc":"568","creditAcc":"221","amount":3.5},{"id":81,"date":"2024-04-16","description":"Servisné služby - ALD Automotive","debitAcc":"518","creditAcc":"321","amount":200.0},{"id":82,"date":"2024-04-18","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":148.5},{"id":83,"date":"2024-04-19","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":24.9},{"id":84,"date":"2024-04-21","description":"Vrátenie nákupu plat. kartou","debitAcc":"221","creditAcc":"325","amount":17.5},{"id":85,"date":"2024-04-22","description":"Úhrada faktúry ALD Automotive","debitAcc":"321","creditAcc":"221","amount":448.32},{"id":86,"date":"2024-04-22","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":55.0},{"id":87,"date":"2024-04-22","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":60.71},{"id":88,"date":"2024-04-22","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":21.0},{"id":89,"date":"2024-04-24","description":"Ostatné služby, licencie - maXXam","debitAcc":"518","creditAcc":"321","amount":400.0},{"id":90,"date":"2024-04-25","description":"Vrátenie výpomoci konateľa","debitAcc":"221","creditAcc":"249","amount":1150.0},{"id":91,"date":"2024-04-25","description":"Vrátenie výpomoci konateľa","debitAcc":"221","creditAcc":"249","amount":500.0},{"id":92,"date":"2024-04-25","description":"Úhrada faktúry Orange","debitAcc":"321","creditAcc":"221","amount":49.56},{"id":93,"date":"2024-04-25","description":"Prevádzkový materiál","debitAcc":"501","creditAcc":"325","amount":581.5},{"id":94,"date":"2024-04-26","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":24.5},{"id":95,"date":"2024-04-27","description":"Výpomoc konateľa","debitAcc":"249","creditAcc":"221","amount":3250.0},{"id":96,"date":"2024-04-28","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":63.85},{"id":97,"date":"2024-04-29","description":"Vrátenie výpomoci konateľa","debitAcc":"221","creditAcc":"249","amount":3250.0},{"id":98,"date":"2024-04-30","description":"Ekonomické poradenstvo - REINS INVEST","debitAcc":"311","creditAcc":"602","amount":1105.0},{"id":99,"date":"2024-04-30","description":"Bankové poplatky","debitAcc":"568","creditAcc":"221","amount":8.0},{"id":100,"date":"2024-05-03","description":"Telefón, internet - Orange","debitAcc":"518","creditAcc":"321","amount":50.76},{"id":101,"date":"2024-05-03","description":"Náklady na reprezentáciu - JAMAE","debitAcc":"513","creditAcc":"211","amount":20.6},{"id":102,"date":"2024-05-06","description":"Leasing 05/24 - ALD Automotive","debitAcc":"518","creditAcc":"321","amount":448.32},{"id":103,"date":"2024-05-06","description":"Predplatné časopisov - N Press","debitAcc":"518","creditAcc":"321","amount":6.99},{"id":104,"date":"2024-05-06","description":"Výpomoc konateľa","debitAcc":"249","creditAcc":"221","amount":200.0},{"id":105,"date":"2024-05-06","description":"Inkaso faktúry 20240004 REINS","debitAcc":"221","creditAcc":"311","amount":1105.0},{"id":106,"date":"2024-05-07","description":"Úhrada faktúry ALD Automotive servis","debitAcc":"321","creditAcc":"221","amount":200.0},{"id":107,"date":"2024-05-07","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":64.2},{"id":108,"date":"2024-05-07","description":"Úhrada faktúry N Press","debitAcc":"321","creditAcc":"221","amount":6.99},{"id":109,"date":"2024-05-10","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":61.74},{"id":110,"date":"2024-05-12","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":7.49},{"id":111,"date":"2024-05-12","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":19.9},{"id":112,"date":"2024-05-16","description":"Bankové poplatky","debitAcc":"568","creditAcc":"221","amount":1.62},{"id":113,"date":"2024-05-16","description":"Bankové poplatky","debitAcc":"568","creditAcc":"221","amount":0.03},{"id":114,"date":"2024-05-17","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":31.0},{"id":115,"date":"2024-05-17","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":1.2},{"id":116,"date":"2024-05-17","description":"Bankové poplatky","debitAcc":"568","creditAcc":"221","amount":1.21},{"id":117,"date":"2024-05-17","description":"Bankové poplatky","debitAcc":"568","creditAcc":"221","amount":0.02},{"id":118,"date":"2024-05-17","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":83.05},{"id":119,"date":"2024-05-17","description":"Bankové poplatky","debitAcc":"568","creditAcc":"221","amount":1.21},{"id":120,"date":"2024-05-17","description":"Bankové poplatky","debitAcc":"568","creditAcc":"221","amount":0.02},{"id":121,"date":"2024-05-20","description":"Úhrada faktúry ALD Automotive","debitAcc":"321","creditAcc":"221","amount":448.32},{"id":122,"date":"2024-05-20","description":"Daň z príjmov PO za rok 2023","debitAcc":"341","creditAcc":"221","amount":2693.1},{"id":123,"date":"2024-05-23","description":"Výpomoc konateľa","debitAcc":"249","creditAcc":"221","amount":550.0},{"id":124,"date":"2024-05-23","description":"Vrátenie výpomoci konateľa","debitAcc":"221","creditAcc":"249","amount":550.0},{"id":125,"date":"2024-05-23","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":21.6},{"id":126,"date":"2024-05-23","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":4.29},{"id":127,"date":"2024-05-24","description":"Prevádzkový materiál","debitAcc":"501","creditAcc":"325","amount":42.82},{"id":128,"date":"2024-05-25","description":"Úhrada faktúry Orange","debitAcc":"321","creditAcc":"221","amount":50.76},{"id":129,"date":"2024-05-31","description":"Ekonomické poradenstvo - REINS INVEST","debitAcc":"311","creditAcc":"602","amount":1015.0},{"id":130,"date":"2024-05-31","description":"Bankové poplatky","debitAcc":"568","creditAcc":"221","amount":8.0},{"id":131,"date":"2024-06-03","description":"Telefón, internet - Orange","debitAcc":"518","creditAcc":"321","amount":54.1},{"id":132,"date":"2024-06-04","description":"Leasing 06/24 - ALD Automotive","debitAcc":"518","creditAcc":"321","amount":448.32},{"id":133,"date":"2024-06-04","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":77.42},{"id":134,"date":"2024-06-06","description":"Predplatné časopisov - N Press","debitAcc":"518","creditAcc":"321","amount":6.99},{"id":135,"date":"2024-06-06","description":"Inkaso faktúry 20240005 REINS","debitAcc":"221","creditAcc":"311","amount":1015.0},{"id":136,"date":"2024-06-07","description":"Úhrada faktúry maXXam","debitAcc":"321","creditAcc":"221","amount":400.0},{"id":137,"date":"2024-06-07","description":"Úhrada faktúry N Press","debitAcc":"321","creditAcc":"221","amount":6.99},{"id":138,"date":"2024-06-08","description":"Pracovné jednanie","debitAcc":"513","creditAcc":"325","amount":778.8},{"id":139,"date":"2024-06-09","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":36.6},{"id":140,"date":"2024-06-11","description":"Prevádzkový materiál - Alza.sk","debitAcc":"501","creditAcc":"321","amount":18.26},{"id":141,"date":"2024-06-11","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":19.9},{"id":142,"date":"2024-06-13","description":"Úhrada faktúry Alza.sk","debitAcc":"321","creditAcc":"221","amount":18.26},{"id":143,"date":"2024-06-13","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":53.9},{"id":144,"date":"2024-06-13","description":"Bankové poplatky","debitAcc":"568","creditAcc":"221","amount":2.04},{"id":145,"date":"2024-06-13","description":"Bankové poplatky","debitAcc":"568","creditAcc":"221","amount":1.08},{"id":146,"date":"2024-06-13","description":"Bankové poplatky","debitAcc":"568","creditAcc":"221","amount":0.04},{"id":147,"date":"2024-06-13","description":"Bankové poplatky","debitAcc":"568","creditAcc":"221","amount":0.37},{"id":148,"date":"2024-06-14","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":1.2},{"id":149,"date":"2024-06-14","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":31.0},{"id":150,"date":"2024-06-15","description":"Bankové poplatky","debitAcc":"568","creditAcc":"221","amount":2.44},{"id":151,"date":"2024-06-15","description":"Bankové poplatky","debitAcc":"568","creditAcc":"221","amount":0.05},{"id":152,"date":"2024-06-17","description":"Poštovné - Slovenská pošta","debitAcc":"518","creditAcc":"211","amount":5.2},{"id":153,"date":"2024-06-17","description":"Ostatné služby - Slovenská pošta","debitAcc":"518","creditAcc":"211","amount":6.0},{"id":154,"date":"2024-06-17","description":"Cestovné - SAD Žilina","debitAcc":"518","creditAcc":"211","amount":3.9},{"id":155,"date":"2024-06-17","description":"Úhrada faktúry ALD Automotive","debitAcc":"321","creditAcc":"221","amount":448.32},{"id":156,"date":"2024-06-18","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":2.8},{"id":157,"date":"2024-06-20","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":80.34},{"id":158,"date":"2024-06-25","description":"Úhrada faktúry Orange","debitAcc":"321","creditAcc":"221","amount":54.1},{"id":159,"date":"2024-06-27","description":"Náklady na reprezentáciu","debitAcc":"513","creditAcc":"211","amount":26.89},{"id":160,"date":"2024-06-27","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":7.49},{"id":161,"date":"2024-06-27","description":"Diaľničné poplatky","debitAcc":"518","creditAcc":"325","amount":11.5},{"id":162,"date":"2024-06-27","description":"PHM","debitAcc":"501","creditAcc":"325","amount":904.41},{"id":163,"date":"2024-06-28","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":65.9},{"id":164,"date":"2024-06-28","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":24.39},{"id":165,"date":"2024-06-30","description":"Ekonomické poradenstvo - REINS INVEST","debitAcc":"311","creditAcc":"602","amount":1006.0},{"id":166,"date":"2024-06-30","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":11.5},{"id":167,"date":"2024-06-30","description":"Bankové poplatky","debitAcc":"568","creditAcc":"221","amount":8.0},{"id":168,"date":"2024-07-01","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":31.5},{"id":169,"date":"2024-07-01","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":54.27},{"id":170,"date":"2024-07-03","description":"Telefón, internet - Orange","debitAcc":"518","creditAcc":"321","amount":52.67},{"id":171,"date":"2024-07-04","description":"Leasing 07/24 - ALD Automotive","debitAcc":"518","creditAcc":"321","amount":448.32},{"id":172,"date":"2024-07-04","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":65.11},{"id":173,"date":"2024-07-07","description":"Predplatné časopisov - N Press","debitAcc":"518","creditAcc":"321","amount":7.99},{"id":174,"date":"2024-07-08","description":"Inkaso faktúry 20240006 REINS","debitAcc":"221","creditAcc":"311","amount":1006.0},{"id":175,"date":"2024-07-08","description":"Úhrada faktúry N Press","debitAcc":"321","creditAcc":"221","amount":7.99},{"id":176,"date":"2024-07-10","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":3.0},{"id":177,"date":"2024-07-12","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":79.69},{"id":178,"date":"2024-07-17","description":"Úhrada faktúry ALD Automotive","debitAcc":"321","creditAcc":"221","amount":448.32},{"id":179,"date":"2024-07-27","description":"Úhrada faktúry Orange","debitAcc":"321","creditAcc":"221","amount":52.67},{"id":180,"date":"2024-07-29","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":74.67},{"id":181,"date":"2024-07-31","description":"Ekonomické poradenstvo - REINS INVEST","debitAcc":"311","creditAcc":"602","amount":900.0},{"id":182,"date":"2024-07-31","description":"Bankové poplatky","debitAcc":"568","creditAcc":"221","amount":8.0},{"id":183,"date":"2024-08-02","description":"Pracovné jednanie","debitAcc":"513","creditAcc":"221","amount":12.55},{"id":184,"date":"2024-08-03","description":"Telefón, internet - Orange","debitAcc":"518","creditAcc":"321","amount":48.58},{"id":185,"date":"2024-08-05","description":"Inkaso faktúry 20240007 REINS","debitAcc":"221","creditAcc":"311","amount":900.0},{"id":186,"date":"2024-08-06","description":"Leasing 08/24 - ALD Automotive","debitAcc":"518","creditAcc":"321","amount":448.32},{"id":187,"date":"2024-08-07","description":"Predplatné časopisov - N Press","debitAcc":"518","creditAcc":"321","amount":7.99},{"id":188,"date":"2024-08-08","description":"Úhrada faktúry N Press","debitAcc":"321","creditAcc":"221","amount":7.99},{"id":189,"date":"2024-08-14","description":"Úhrada faktúry ALD Automotive","debitAcc":"321","creditAcc":"221","amount":448.32},{"id":190,"date":"2024-08-15","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":76.73},{"id":191,"date":"2024-08-15","description":"Úhrada faktúry Orange","debitAcc":"321","creditAcc":"221","amount":48.58},{"id":192,"date":"2024-08-20","description":"Ostatné služby - Slovenská pošta","debitAcc":"518","creditAcc":"211","amount":7.0},{"id":193,"date":"2024-08-27","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":31.0},{"id":194,"date":"2024-08-27","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":71.36},{"id":195,"date":"2024-08-28","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":53.9},{"id":196,"date":"2024-08-28","description":"Bankové poplatky","debitAcc":"568","creditAcc":"221","amount":2.0},{"id":197,"date":"2024-08-28","description":"Bankové poplatky","debitAcc":"568","creditAcc":"221","amount":1.08},{"id":198,"date":"2024-08-28","description":"Bankové poplatky","debitAcc":"568","creditAcc":"221","amount":0.04},{"id":199,"date":"2024-08-29","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":31.0},{"id":200,"date":"2024-08-31","description":"Ekonomické poradenstvo - REINS INVEST","debitAcc":"311","creditAcc":"602","amount":1020.0},{"id":201,"date":"2024-08-31","description":"Bankové poplatky","debitAcc":"568","creditAcc":"221","amount":8.0},{"id":202,"date":"2024-09-03","description":"Telefón, internet - Orange","debitAcc":"518","creditAcc":"321","amount":54.0},{"id":203,"date":"2024-09-05","description":"Leasing 09/24 - ALD Automotive","debitAcc":"518","creditAcc":"321","amount":448.32},{"id":204,"date":"2024-09-06","description":"Inkaso faktúry 20240008 REINS","debitAcc":"221","creditAcc":"311","amount":1020.0},{"id":205,"date":"2024-09-06","description":"Úhrada faktúry N Press","debitAcc":"321","creditAcc":"221","amount":7.99},{"id":206,"date":"2024-09-07","description":"Predplatné časopisov - N Press","debitAcc":"518","creditAcc":"321","amount":7.99},{"id":207,"date":"2024-09-12","description":"Prevádzkový materiál","debitAcc":"501","creditAcc":"325","amount":1.1},{"id":208,"date":"2024-09-12","description":"Poštovné, prepravné","debitAcc":"518","creditAcc":"325","amount":4.3},{"id":209,"date":"2024-09-13","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":1.1},{"id":210,"date":"2024-09-13","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":1.5},{"id":211,"date":"2024-09-19","description":"Úhrada faktúry ALD Automotive","debitAcc":"321","creditAcc":"221","amount":448.32},{"id":212,"date":"2024-09-19","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":76.54},{"id":213,"date":"2024-09-22","description":"Prevádzkový materiál - SeS Bratislava","debitAcc":"501","creditAcc":"211","amount":4.49},{"id":214,"date":"2024-09-23","description":"Ostatné služby - Italy car rent","debitAcc":"518","creditAcc":"321","amount":195.0},{"id":215,"date":"2024-09-23","description":"Ostatné služby - Italy car rent","debitAcc":"518","creditAcc":"321","amount":165.55},{"id":216,"date":"2024-09-23","description":"Vrátenie výpomoci konateľa","debitAcc":"221","creditAcc":"249","amount":800.0},{"id":217,"date":"2024-09-23","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":15.47},{"id":218,"date":"2024-09-24","description":"Úhrada faktúry Italy car rent","debitAcc":"321","creditAcc":"221","amount":195.0},{"id":219,"date":"2024-09-24","description":"Úhrada faktúry Italy car rent","debitAcc":"321","creditAcc":"221","amount":165.55},{"id":220,"date":"2024-09-24","description":"Úhrada faktúry Orange","debitAcc":"321","creditAcc":"221","amount":54.0},{"id":221,"date":"2024-09-30","description":"Ekonomické poradenstvo - REINS INVEST","debitAcc":"311","creditAcc":"602","amount":900.0},{"id":222,"date":"2024-09-30","description":"Tržby za poskytnuté služby - maXXam","debitAcc":"311","creditAcc":"602","amount":3000.0},{"id":223,"date":"2024-09-30","description":"Bankové poplatky","debitAcc":"568","creditAcc":"221","amount":8.0},{"id":224,"date":"2024-09-30","description":"Zdravotné poistenie-zamestnávateľ 9/24","debitAcc":"524","creditAcc":"336","amount":16.38},{"id":225,"date":"2024-09-30","description":"Hrubé mzdy - dohody 9/24","debitAcc":"521","creditAcc":"331","amount":148.91},{"id":226,"date":"2024-09-30","description":"Sociálne poistenie-zamestnávateľ 9/24","debitAcc":"524","creditAcc":"336","amount":36.67},{"id":227,"date":"2024-10-03","description":"Leasing 10/24 - ALD Automotive","debitAcc":"518","creditAcc":"321","amount":448.32},{"id":228,"date":"2024-10-03","description":"Telefón, internet - Orange","debitAcc":"518","creditAcc":"321","amount":51.8},{"id":229,"date":"2024-10-06","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":2.0},{"id":230,"date":"2024-10-08","description":"Predplatné časopisov - N Press","debitAcc":"518","creditAcc":"321","amount":7.99},{"id":231,"date":"2024-10-08","description":"Inkaso faktúry 20240009 REINS","debitAcc":"221","creditAcc":"311","amount":900.0},{"id":232,"date":"2024-10-09","description":"Úhrada faktúry N Press","debitAcc":"321","creditAcc":"221","amount":7.99},{"id":233,"date":"2024-10-09","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":80.64},{"id":234,"date":"2024-10-13","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":34.6},{"id":235,"date":"2024-10-15","description":"Výplata mzdy 9/2024","debitAcc":"331","creditAcc":"211","amount":104.49},{"id":236,"date":"2024-10-15","description":"Úhrada soc. a zdrav. poistenia","debitAcc":"336","creditAcc":"221","amount":22.33},{"id":237,"date":"2024-10-15","description":"Úhrada dane z príjmov závislá č.","debitAcc":"342","creditAcc":"221","amount":24.51},{"id":238,"date":"2024-10-15","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":20.0},{"id":239,"date":"2024-10-16","description":"Úhrada faktúry ALD Automotive","debitAcc":"321","creditAcc":"221","amount":448.32},{"id":240,"date":"2024-10-17","description":"Úhrada soc. poistenia","debitAcc":"336","creditAcc":"221","amount":50.63},{"id":241,"date":"2024-10-17","description":"Úhrada faktúry Orange","debitAcc":"321","creditAcc":"221","amount":51.8},{"id":242,"date":"2024-10-19","description":"Prevádzkový materiál","debitAcc":"501","creditAcc":"325","amount":63.16},{"id":243,"date":"2024-10-20","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":7.19},{"id":244,"date":"2024-10-24","description":"Výpomoc konateľa","debitAcc":"249","creditAcc":"221","amount":800.0},{"id":245,"date":"2024-10-30","description":"Ostatné služby, licencie - maXXam","debitAcc":"518","creditAcc":"321","amount":1850.0},{"id":246,"date":"2024-10-31","description":"Ekonomické poradenstvo - REINS INVEST","debitAcc":"311","creditAcc":"602","amount":970.0},{"id":247,"date":"2024-10-31","description":"Bankové poplatky","debitAcc":"568","creditAcc":"221","amount":8.0},{"id":248,"date":"2024-10-31","description":"Sociálne poistenie-zamestnávateľ 10/24","debitAcc":"524","creditAcc":"336","amount":48.97},{"id":249,"date":"2024-10-31","description":"Zdravotné poistenie-zamestnávateľ 10/24","debitAcc":"524","creditAcc":"336","amount":21.83},{"id":250,"date":"2024-10-31","description":"Hrubé mzdy - dohody 10/24","debitAcc":"521","creditAcc":"331","amount":198.5},{"id":251,"date":"2024-11-02","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":64.04},{"id":252,"date":"2024-11-02","description":"Výpomoc konateľa","debitAcc":"249","creditAcc":"221","amount":50.0},{"id":253,"date":"2024-11-03","description":"Telefón, internet - Orange","debitAcc":"518","creditAcc":"321","amount":57.87},{"id":254,"date":"2024-11-05","description":"Ostatné služby, licencie - KROS","debitAcc":"518","creditAcc":"321","amount":9.24},{"id":255,"date":"2024-11-06","description":"Leasing 11/24 - ALD Automotive","debitAcc":"518","creditAcc":"321","amount":448.32},{"id":256,"date":"2024-11-06","description":"Úhrada faktúry KROS","debitAcc":"321","creditAcc":"221","amount":9.24},{"id":257,"date":"2024-11-06","description":"Ostatné služby","debitAcc":"518","creditAcc":"221","amount":4.5},{"id":258,"date":"2024-11-08","description":"Predplatné časopisov - N Press","debitAcc":"518","creditAcc":"321","amount":7.99},{"id":259,"date":"2024-11-08","description":"Inkaso faktúry 20240011 REINS","debitAcc":"221","creditAcc":"311","amount":970.0},{"id":260,"date":"2024-11-10","description":"Úhrada faktúry N Press","debitAcc":"321","creditAcc":"221","amount":7.99},{"id":261,"date":"2024-11-11","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":83.25},{"id":262,"date":"2024-11-15","description":"Výplata mzdy 10/2024","debitAcc":"331","creditAcc":"211","amount":139.26},{"id":263,"date":"2024-11-15","description":"Úhrada faktúry ALD Automotive","debitAcc":"321","creditAcc":"221","amount":448.32},{"id":264,"date":"2024-11-15","description":"Úhrada dane z príjmov závislá č.","debitAcc":"342","creditAcc":"221","amount":32.66},{"id":265,"date":"2024-11-16","description":"Úhrada soc. a zdrav. poistenia","debitAcc":"336","creditAcc":"221","amount":29.77},{"id":266,"date":"2024-11-17","description":"Úhrada soc. poistenia","debitAcc":"336","creditAcc":"221","amount":67.61},{"id":267,"date":"2024-11-21","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":43.96},{"id":268,"date":"2024-11-22","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":10.5},{"id":269,"date":"2024-11-26","description":"Úhrada faktúry Orange","debitAcc":"321","creditAcc":"221","amount":57.87},{"id":270,"date":"2024-11-30","description":"Ostatné služby, licencie - maXXam","debitAcc":"518","creditAcc":"321","amount":5900.0},{"id":271,"date":"2024-11-30","description":"Ekonomické poradenstvo - REINS INVEST","debitAcc":"311","creditAcc":"602","amount":900.0},{"id":272,"date":"2024-11-30","description":"Tržby za poskytnuté služby - maXXam","debitAcc":"311","creditAcc":"602","amount":5400.0},{"id":273,"date":"2024-11-30","description":"Bankové poplatky","debitAcc":"568","creditAcc":"221","amount":8.0},{"id":274,"date":"2024-11-30","description":"Zdravotné poistenie-zamestnávateľ 11/24","debitAcc":"524","creditAcc":"336","amount":20.35},{"id":275,"date":"2024-11-30","description":"Hrubé mzdy - dohody 11/24","debitAcc":"521","creditAcc":"331","amount":185.0},{"id":276,"date":"2024-11-30","description":"Sociálne poistenie-zamestnávateľ 11/24","debitAcc":"524","creditAcc":"336","amount":45.6},{"id":277,"date":"2024-12-01","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":69.86},{"id":278,"date":"2024-12-03","description":"Telefón, internet - Orange","debitAcc":"518","creditAcc":"321","amount":54.98},{"id":279,"date":"2024-12-04","description":"Leasing 12/24 - ALD Automotive","debitAcc":"518","creditAcc":"321","amount":448.32},{"id":280,"date":"2024-12-06","description":"Inkaso faktúry 20240012 REINS","debitAcc":"221","creditAcc":"311","amount":900.0},{"id":281,"date":"2024-12-06","description":"Parkovné","debitAcc":"518","creditAcc":"325","amount":25.5},{"id":282,"date":"2024-12-06","description":"PHM","debitAcc":"501","creditAcc":"325","amount":1026.61},{"id":283,"date":"2024-12-08","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":2.5},{"id":284,"date":"2024-12-09","description":"Predplatné časopisov - N Press","debitAcc":"518","creditAcc":"321","amount":7.99},{"id":285,"date":"2024-12-09","description":"Výpomoc konateľa","debitAcc":"249","creditAcc":"221","amount":500.0},{"id":286,"date":"2024-12-09","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":71.69},{"id":287,"date":"2024-12-10","description":"Úhrada faktúry N Press","debitAcc":"321","creditAcc":"221","amount":7.99},{"id":288,"date":"2024-12-10","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":21.9},{"id":289,"date":"2024-12-10","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":53.74},{"id":290,"date":"2024-12-10","description":"Ubytovanie","debitAcc":"518","creditAcc":"325","amount":474.34},{"id":291,"date":"2024-12-10","description":"Cestovné","debitAcc":"518","creditAcc":"325","amount":462.42},{"id":292,"date":"2024-12-11","description":"Ostatné služby, licencie - maXXam","debitAcc":"518","creditAcc":"321","amount":1100.0},{"id":293,"date":"2024-12-12","description":"Parkovné","debitAcc":"518","creditAcc":"211","amount":12.0},{"id":294,"date":"2024-12-12","description":"Bankové poplatky","debitAcc":"568","creditAcc":"221","amount":1.07},{"id":295,"date":"2024-12-12","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":2.85},{"id":296,"date":"2024-12-12","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":28.8},{"id":297,"date":"2024-12-15","description":"Výplata mzdy 11/2024","debitAcc":"331","creditAcc":"211","amount":129.77},{"id":298,"date":"2024-12-15","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":3.0},{"id":299,"date":"2024-12-16","description":"Úhrada dane z príjmov závislá č.","debitAcc":"342","creditAcc":"221","amount":30.44},{"id":300,"date":"2024-12-16","description":"Úhrada soc. a zdrav. poistenia","debitAcc":"336","creditAcc":"221","amount":27.75},{"id":301,"date":"2024-12-16","description":"Úhrada soc. poistenia","debitAcc":"336","creditAcc":"221","amount":62.99},{"id":302,"date":"2024-12-17","description":"Ostatné služby","debitAcc":"518","creditAcc":"221","amount":10.5},{"id":303,"date":"2024-12-19","description":"Nákup plat. kartou","debitAcc":"325","creditAcc":"221","amount":72.64},{"id":304,"date":"2024-12-21","description":"Ostatné služby, licencie - SuperFaktura","debitAcc":"518","creditAcc":"321","amount":14.39},{"id":305,"date":"2024-12-23","description":"Úhrada faktúry SuperFaktura","debitAcc":"321","creditAcc":"221","amount":14.39},{"id":306,"date":"2024-12-28","description":"Úhrada faktúry Orange","debitAcc":"321","creditAcc":"221","amount":54.98},{"id":307,"date":"2024-12-30","description":"Ostatné služby, licencie - maXXam","debitAcc":"518","creditAcc":"321","amount":4550.0},{"id":308,"date":"2024-12-30","description":"Vrátenie výpomoci konateľa","debitAcc":"221","creditAcc":"249","amount":5000.0},{"id":309,"date":"2024-12-31","description":"Ekonomické poradenstvo - REINS INVEST","debitAcc":"311","creditAcc":"602","amount":1025.0},{"id":310,"date":"2024-12-31","description":"Vytvorenie reportov - ZVL SLOVAKIA","debitAcc":"311","creditAcc":"602","amount":4200.0},{"id":311,"date":"2024-12-31","description":"Tržby za poskytnuté služby - maXXam","debitAcc":"311","creditAcc":"602","amount":5000.0},{"id":319,"date":"2024-12-31","description":"Daň z príjmov PO","debitAcc":"591","creditAcc":"341","amount":340.0},{"id":320,"date":"2024-12-31","description":"Vrátenie výpomoci konateľa","debitAcc":"221","creditAcc":"249","amount":1050.0},{"id":321,"date":"2024-12-31","description":"Úhrada faktúry ALD Automotive","debitAcc":"321","creditAcc":"221","amount":448.32},{"id":322,"date":"2024-12-31","description":"Inkaso faktúry 20230015","debitAcc":"221","creditAcc":"311","amount":3000.0},{"id":323,"date":"2024-12-31","description":"Bankové poplatky","debitAcc":"568","creditAcc":"221","amount":8.0},{"id":324,"date":"2024-12-31","description":"Zdravotné poistenie-zamestnávateľ 12/24","debitAcc":"524","creditAcc":"336","amount":10.45},{"id":325,"date":"2024-12-31","description":"Hrubé mzdy - dohody 12/24","debitAcc":"521","creditAcc":"331","amount":95.0},{"id":326,"date":"2024-12-31","description":"Sociálne poistenie-zamestnávateľ 12/24","debitAcc":"524","creditAcc":"336","amount":22.93},{"id":327,"date":"2024-12-31","description":"Závierka","debitAcc":"710","creditAcc":"518","amount":9.5},{"id":328,"date":"2024-12-31","description":"Závierka","debitAcc":"710","creditAcc":"518","amount":200.0},{"id":329,"date":"2024-12-31","description":"Závierka","debitAcc":"710","creditAcc":"521","amount":627.41},{"id":330,"date":"2024-12-31","description":"Závierka","debitAcc":"710","creditAcc":"524","amount":154.17},{"id":331,"date":"2024-12-31","description":"Závierka","debitAcc":"710","creditAcc":"524","amount":69.01},{"id":332,"date":"2024-12-31","description":"Závierka","debitAcc":"710","creditAcc":"568","amount":114.77},{"id":333,"date":"2024-12-31","description":"Závierka","debitAcc":"710","creditAcc":"591","amount":340.0},{"id":334,"date":"2024-12-31","description":"Závierka","debitAcc":"602","creditAcc":"710","amount":17600.0},{"id":335,"date":"2024-12-31","description":"Závierka","debitAcc":"602","creditAcc":"710","amount":11541.0},{"id":336,"date":"2024-12-31","description":"Závierka - ubytovanie","debitAcc":"710","creditAcc":"518","amount":474.34},{"id":337,"date":"2024-12-31","description":"Závierka - predplatné","debitAcc":"710","creditAcc":"518","amount":89.88},{"id":338,"date":"2024-12-31","description":"Závierka - diaľničné","debitAcc":"710","creditAcc":"518","amount":71.5},{"id":339,"date":"2024-12-31","description":"Závierka","debitAcc":"710","creditAcc":"501","amount":2405.8},{"id":340,"date":"2024-12-31","description":"Závierka - parkovné","debitAcc":"710","creditAcc":"518","amount":37.5},{"id":341,"date":"2024-12-31","description":"Závierka - telefón","debitAcc":"710","creditAcc":"518","amount":625.63},{"id":342,"date":"2024-12-31","description":"Závierka - ostatné služby","debitAcc":"710","creditAcc":"518","amount":13845.63},{"id":343,"date":"2024-12-31","description":"Závierka - ostatné","debitAcc":"710","creditAcc":"518","amount":858.87},{"id":344,"date":"2024-12-31","description":"Závierka","debitAcc":"710","creditAcc":"513","amount":838.84},{"id":345,"date":"2024-12-31","description":"Závierka - kancelária","debitAcc":"710","creditAcc":"501","amount":6.57},{"id":346,"date":"2024-12-31","description":"Závierka - PHM","debitAcc":"710","creditAcc":"501","amount":1931.02},{"id":347,"date":"2024-12-31","description":"Závierka - leasing","debitAcc":"710","creditAcc":"518","amount":5378.72},{"id":348,"date":"2024-12-31","description":"Závierka","debitAcc":"710","creditAcc":"702","amount":1061.84},{"id":349,"date":"2024-12-31","description":"Závierka","debitAcc":"341","creditAcc":"702","amount":340.0},{"id":350,"date":"2024-12-31","description":"Závierka","debitAcc":"428","creditAcc":"702","amount":25879.12},{"id":351,"date":"2024-12-31","description":"Závierka","debitAcc":"411","creditAcc":"702","amount":5000.0},{"id":352,"date":"2024-12-31","description":"Závierka","debitAcc":"342","creditAcc":"702","amount":15.63},{"id":353,"date":"2024-12-31","description":"Závierka","debitAcc":"336","creditAcc":"702","amount":14.25},{"id":354,"date":"2024-12-31","description":"Závierka","debitAcc":"336","creditAcc":"702","amount":31.86},{"id":355,"date":"2024-12-31","description":"Závierka","debitAcc":"331","creditAcc":"702","amount":66.64},{"id":356,"date":"2024-12-31","description":"Závierka","debitAcc":"702","creditAcc":"311","amount":12225.0},{"id":357,"date":"2024-12-31","description":"Závierka","debitAcc":"702","creditAcc":"211","amount":11006.32},{"id":358,"date":"2024-12-31","description":"Závierka","debitAcc":"702","creditAcc":"221","amount":9178.02},{"id":9001,"date":"2024-12-31","description":"Zápočet maXXam - OF 20240013 vs DF 20240041/20036","debitAcc":"321","creditAcc":"311","amount":5400.0},{"id":9002,"date":"2024-12-31","description":"Zápočet maXXam - OF 20240016 vs DF 20240047","debitAcc":"321","creditAcc":"311","amount":5000.0},{"id":9003,"date":"2024-12-31","description":"Zápočet maXXam - OF 20240010 vs DF 20240045","debitAcc":"321","creditAcc":"311","amount":3000.0}],"openingBalances":{}};
+
+// ── SR Štandardné výkazy ────────────────────────────────────────────────────
+
+// Mapovanie účtov na štandardné riadky súvahy SR
+// ── SR Štruktúra súvahy (Opatrenie MF SR č. 4455/2003-92) ──────────────────
+// Aktíva
+const SA_ROWS = [
+  // id, label, codes, level  (level 0 = sekcia, 1 = podsekcia, 2 = riadok)
+  { id:"A",     label:"A.   POHĽADÁVKY ZA UPÍSANÉ VLASTNÉ IMANIE", codes:[],                           lv:0 },
+  { id:"B",     label:"B.   NEOBEŽNÝ MAJETOK",                     codes:["021","022","029","051","052"],lv:0 },
+  { id:"B.I",   label:"B.I.   Dlhodobý nehmotný majetok",          codes:[],                           lv:1 },
+  { id:"B.II",  label:"B.II.  Dlhodobý hmotný majetok",            codes:["021","022","029"],           lv:2 },
+  { id:"B.III", label:"B.III. Dlhodobý finančný majetok",          codes:[],                           lv:1 },
+  { id:"C",     label:"C.   OBEŽNÝ MAJETOK",                       codes:["112","211","221","249","261","311","315"],lv:0 },
+  { id:"C.I",   label:"C.I.   Zásoby",                             codes:["112"],                      lv:1 },
+  { id:"C.II",  label:"C.II.  Dlhodobé pohľadávky",                codes:[],                           lv:1 },
+  { id:"C.III", label:"C.III. Krátkodobé pohľadávky",              codes:["311","315"],                 lv:2 },
+  { id:"C.IV",  label:"C.IV.  Finančné účty",                      codes:["211","221","249","261"],     lv:2 },
+  { id:"D",     label:"D.   ČASOVÉ ROZLÍŠENIE",                    codes:[],                           lv:0 },
+];
+
+// Pasíva
+const SP_ROWS = [
+  { id:"A",      label:"A.   VLASTNÉ IMANIE",                         codes:["411","428","431"],        lv:0, addVH:true },
+  { id:"A.I",    label:"A.I.   Základné imanie",                      codes:["411"],                    lv:1 },
+  { id:"A.II",   label:"A.II.  Kapitálové fondy",                     codes:[],                         lv:1 },
+  { id:"A.III",  label:"A.III. Fondy zo zisku",                       codes:[],                         lv:1 },
+  { id:"A.IV",   label:"A.IV.  VH minulých rokov",                    codes:["428","431"],              lv:1 },
+  { id:"A.V",    label:"A.V.   VH bežného účtovného obdobia",         codes:[],                         lv:1, isVH:true },
+  { id:"B",      label:"B.   ZÁVÄZKY",                                codes:["321","325","331","336","341","342"],lv:0 },
+  { id:"B.I",    label:"B.I.   Rezervy",                              codes:[],                         lv:1 },
+  { id:"B.II",   label:"B.II.  Dlhodobé záväzky",                     codes:[],                         lv:1 },
+  { id:"B.III",  label:"B.III. Krátkodobé záväzky",                   codes:["321","325","331","336","341","342"],lv:2 },
+  { id:"B.IV",   label:"B.IV.  Bankové úvery a výpomoci",             codes:[],                         lv:1 },
+  { id:"C",      label:"C.   ČASOVÉ ROZLÍŠENIE",                      codes:[],                         lv:0 },
+];
+
+// VZS riadky (Opatrenie MF SR č. 4455/2003-92, príloha č. 2)
+const VZS_ROWS = [
+  // VÝNOSY Z HOSPODÁRSKEJ ČINNOSTI
+  { id:"01", label:"Tržby z predaja tovaru",                          codes:["604"],         type:"V" },
+  { id:"02", label:"Náklady vynaložené na obstaranie predaného tovaru",codes:[],             type:"NK" },
+  { id:"03", label:"Obchodná marža (r.01–r.02)",                      codes:[],             type:"MARZA" },
+  { id:"04", label:"Tržby z predaja vlastných výrobkov a služieb",    codes:["601","602"],  type:"V" },
+  { id:"05", label:"Zmena stavu vnútroorg. zásob",                    codes:[],             type:"V" },
+  { id:"06", label:"Aktivácia",                                       codes:[],             type:"V" },
+  { id:"07", label:"Tržby z predaja dlhodobého majetku a materiálu",  codes:[],             type:"V" },
+  { id:"08", label:"Ostatné výnosy z hospodárskej činnosti",          codes:["648"],        type:"V" },
+  { id:"09", label:"VÝNOSY Z HOSPODÁRSKEJ ČINNOSTI SPOLU",            codes:["601","602","604","648"], type:"SUBTV" },
+  // NÁKLADY NA HOSPODÁRSKU ČINNOSŤ
+  { id:"10", label:"Náklady na obstaranie predaného tovaru",          codes:[],             type:"N" },
+  { id:"11", label:"Spotreba materiálu, energie a ost. neskladov. dodávok", codes:["501","502"], type:"N" },
+  { id:"12", label:"Služby",                                          codes:["518"],        type:"N" },
+  { id:"13", label:"Osobné náklady",                                  codes:["521","524"],  type:"N" },
+  { id:"14", label:"Dane a poplatky",                                 codes:["532","538"],  type:"N" },
+  { id:"15", label:"Odpisy a OP k dlhodobému majetku",               codes:["551"],        type:"N" },
+  { id:"16", label:"ZC predaného DM a predaného materiálu",          codes:[],             type:"N" },
+  { id:"17", label:"Tvorba OP k pohľadávkam",                        codes:[],             type:"N" },
+  { id:"18", label:"Ostatné náklady na hospodársku činnosť",         codes:["513","543"],  type:"N" },
+  { id:"19", label:"NÁKLADY NA HOSPODÁRSKU ČINNOSŤ SPOLU",           codes:["501","502","518","521","524","551","513","543","532","538"], type:"SUBTN" },
+  { id:"20", label:"* VÝSLEDOK HOSP. Z HOSPODÁRSKEJ ČINNOSTI (r.09–r.19)", codes:[], type:"VHH" },
+  // FINANČNÁ ČASŤ
+  { id:"21", label:"Tržby z predaja cenných papierov a podielov",    codes:[],             type:"VF" },
+  { id:"22", label:"Výnosy z dlhodobého finančného majetku",         codes:[],             type:"VF" },
+  { id:"27", label:"Ostatné výnosy z finančnej činnosti",            codes:[],             type:"VF" },
+  { id:"28", label:"VÝNOSY Z FINANČNEJ ČINNOSTI SPOLU",              codes:[],             type:"SUBTVF" },
+  { id:"29", label:"Náklady na finančnú činnosť",                    codes:["568"],        type:"NF" },
+  { id:"30", label:"NÁKLADY NA FINANČNÚ ČINNOSŤ SPOLU",              codes:["568"],        type:"SUBTNF" },
+  { id:"31", label:"* VÝSLEDOK HOSP. Z FINANČNEJ ČINNOSTI (r.28–r.30)", codes:[],         type:"VHF" },
+  // SÚHRNNÉ
+  { id:"32", label:"** VÝSLEDOK HOSP. Z BEŽNEJ ČINNOSTI (r.20+r.31)", codes:[],           type:"VHB" },
+  { id:"33", label:"Mimoriadne výnosy",                              codes:[],             type:"VM" },
+  { id:"34", label:"Mimoriadne náklady",                             codes:[],             type:"NM" },
+  { id:"35", label:"* VÝSLEDOK HOSP. Z MIMORIADNEJ ČINNOSTI (r.33–r.34)", codes:[],      type:"VHM" },
+  { id:"36", label:"Daň z príjmov",                                  codes:["591","595"],  type:"DAN" },
+  { id:"37", label:"*** VÝSLEDOK HOSP. ZA ÚČTOVNÉ OBDOBIE (r.32+r.35–r.36)", codes:[],  type:"TOTAL" },
+];
+
+// ── Pomocné funkcie ──────────────────────────────────────────────────────────
+function getVal(codes, ledger) {
+  return codes.reduce((s, c) => {
+    const a = ledger[c];
+    return s + (a ? balance(a) : 0);
+  }, 0);
+}
+
+function buildSuvahaRows(template, ledger, vhp) {
+  return template.map(row => {
+    let val;
+    if (row.isVH)      val = vhp;
+    else if (row.addVH) val = getVal(row.codes, ledger) + vhp;
+    else               val = getVal(row.codes, ledger);
+    return { ...row, val };
+  });
+}
+
+function buildVzsRows(ledger) {
+  const v_HC  = getVal(["601","602","604","648"], ledger);
+  const n_B   = getVal(["501","502"], ledger);
+  const n_S   = getVal(["518"], ledger);
+  const n_O   = getVal(["521","524"], ledger);
+  const n_Ost = getVal(["513","543","532","538"], ledger);
+  const n_Odp = getVal(["551"], ledger);
+  const n_HC  = n_B + n_S + n_O + n_Ost + n_Odp;
+  const vhHC  = v_HC - n_HC;
+  const n_Fin = getVal(["568"], ledger);
+  const vhF   = -n_Fin;
+  const vhB   = vhHC + vhF;
+  const dan   = getVal(["591","595"], ledger);
+  const vhTotal = vhB - dan;
+
+  const computed = {
+    "09": v_HC,
+    "19": n_HC,
+    "20": vhHC,
+    "28": 0,
+    "30": n_Fin,
+    "31": vhF,
+    "32": vhB,
+    "35": 0,
+    "36": dan,
+    "37": vhTotal,
+    "MARZA": 0,
+    "SUBTVF": 0,
+    "SUBTNF": n_Fin,
+    "VHH": vhHC,
+    "VHF": vhF,
+    "VHB": vhB,
+    "VHM": 0,
+    "DAN": dan,
+    "TOTAL": vhTotal,
+  };
+
+  return VZS_ROWS.map(row => {
+    let val;
+    if (computed[row.id] !== undefined) val = computed[row.id];
+    else if (computed[row.type] !== undefined) val = computed[row.type];
+    else val = getVal(row.codes || [], ledger);
+    return { ...row, val };
+  });
+}
+
+// ── Excel export ─────────────────────────────────────────────────────────────
+async function exportExcel(suvahaA, suvahaP, vzs, year, companyName) {
+  if (!window.XLSX) {
+    await new Promise((res, rej) => {
+      const s = document.createElement("script");
+      s.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
+      s.onload = res; s.onerror = rej;
+      document.head.appendChild(s);
+    });
+  }
+  const X = window.XLSX;
+  const wb = X.utils.book_new();
+
+  // Helper: create styled sheet
+  function makeSheet(title, company, headers, rows) {
+    const data = [
+      [title],
+      [company],
+      [""],
+      headers,
+      ...rows,
+    ];
+    return X.utils.aoa_to_sheet(data);
+  }
+
+  // Súvaha sheet
+  const suvahaData = [
+    [`SÚVAHA k 31.12.${year}`, "", ""],
+    [companyName, "", ""],
+    ["", "", ""],
+    ["Riadok", "Názov položky", `${year} (€)`],
+    ["", "AKTÍVA", ""],
+    ...suvahaA.map(r => [r.id, r.label, r.val]),
+    ["", "", ""],
+    ["", "PASÍVA", ""],
+    ...suvahaP.map(r => [r.id, r.label, r.val]),
+  ];
+  const ws1 = X.utils.aoa_to_sheet(suvahaData);
+  ws1["!cols"] = [{ wch: 10 }, { wch: 52 }, { wch: 16 }];
+  X.utils.book_append_sheet(wb, ws1, "Súvaha");
+
+  // VZS sheet
+  const vzsData = [
+    [`VÝKAZ ZISKOV A STRÁT za rok ${year}`, "", ""],
+    [companyName, "", ""],
+    ["", "", ""],
+    ["Riadok", "Názov položky", `${year} (€)`],
+    ...vzs.map(r => [r.id, r.label, r.val]),
+  ];
+  const ws2 = X.utils.aoa_to_sheet(vzsData);
+  ws2["!cols"] = [{ wch: 8 }, { wch: 58 }, { wch: 16 }];
+  X.utils.book_append_sheet(wb, ws2, "VZS");
+
+  X.writeFile(wb, `${companyName.replace(/[^a-zA-Z0-9]/g, "_")}_${year}_vykazy.xlsx`);
+}
+
+// ── PDF / Tlač ────────────────────────────────────────────────────────────────
+function printVykaz(type, year, companyName, suvahaA, suvahaP, vzsComputed) {
+  const isSuvaha = type === "suvaha";
+  const title = isSuvaha ? ("S\u00favaha k 31.12." + year) : ("V\u00fdkaz ziskov a str\u00e1t za rok " + year);
+
+  const css = `
+    body{font-family:Arial,sans-serif;font-size:10.5px;margin:18mm 14mm;color:#000}
+    h1{font-size:13px;font-weight:bold;margin:0 0 2px}
+    h2{font-size:10px;font-weight:normal;color:#444;margin:0 0 12px}
+    table{width:100%;border-collapse:collapse;margin-top:6px}
+    thead tr th{background:#e8ecf0;border:1px solid #bbb;padding:4px 7px;font-size:9.5px;text-align:left}
+    td{border:1px solid #d0d0d0;padding:3px 7px;font-size:10px}
+    .sec td{background:#dce3ea;font-weight:bold;font-size:10.5px}
+    .sub td{background:#f0f3f6;font-weight:600}
+    .tot td{background:#c8d8f0;font-weight:bold;font-size:11px;border-top:2px solid #555}
+    .vzs-subtv td{background:#dce8ff;font-weight:bold}
+    .vzs-subtn td{background:#ffe4e4;font-weight:bold}
+    .vzs-res td{background:#d4edda;font-weight:bold}
+    .vzs-total td{background:#c3e6cb;font-weight:bold;font-size:11px;border-top:2px solid #333}
+    .num{text-align:right;font-family:"Courier New",monospace;white-space:nowrap}
+    .indent1{padding-left:18px!important}
+    .indent2{padding-left:34px!important}
+    @page{margin:15mm}
+    @media print{body{margin:0}}
+  `;
+
+  function fmtNum(n) {
+    if (n === undefined || n === null || n === "") return "";
+    return new Intl.NumberFormat("sk-SK", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n);
+  }
+
+  let body = "";
+
+  if (isSuvaha) {
+    const renderSide = (rows, sideTitle) => {
+      let html = `<tr><td colspan="3" style="background:#334155;color:#fff;font-weight:bold;padding:5px 8px;border:1px solid #334155">${sideTitle}</td></tr>`;
+      rows.forEach(r => {
+        const cls = r.lv === 0 ? "sec" : r.lv === 1 ? "sub" : "";
+        const ind = r.lv === 0 ? "" : r.lv === 1 ? "indent1" : "indent2";
+        html += `<tr class="${cls}"><td style="width:60px">${r.id}</td><td class="${ind}">${r.label}</td><td class="num" style="width:120px">${r.val !== 0 ? fmtNum(r.val) : (r.lv > 0 ? "—" : fmtNum(0))}</td></tr>`;
+      });
+      return html;
+    };
+
+    const totalA = suvahaA.find(r => r.id === "C") ? suvahaA.reduce((s, r) => r.lv === 0 ? s + r.val : s, 0) : 0;
+    const totalP = suvahaP.find(r => r.id === "A") ? suvahaP.reduce((s, r) => r.lv === 0 ? s + r.val : s, 0) : 0;
+
+    body = `
+      <table>
+        <thead><tr><th style="width:60px">Riadok</th><th>Položka</th><th style="width:120px;text-align:right">Suma (€)</th></tr></thead>
+        <tbody>
+          ${renderSide(suvahaA, "AKTÍVA")}
+          <tr class="tot"><td colspan="2">AKTÍVA SPOLU</td><td class="num">${fmtNum(totalA)}</td></tr>
+          ${renderSide(suvahaP, "PASÍVA")}
+          <tr class="tot"><td colspan="2">PASÍVA SPOLU</td><td class="num">${fmtNum(totalP)}</td></tr>
+        </tbody>
+      </table>`;
+  } else {
+    const rowClass = (type) => {
+      if (type === "TOTAL") return "vzs-total";
+      if (type === "VHH" || type === "VHF" || type === "VHB") return "vzs-res";
+      if (type === "SUBTV" || type === "SUBTVF") return "vzs-subtv";
+      if (type === "SUBTN" || type === "SUBTNF") return "vzs-subtn";
+      return "";
+    };
+    const isSection = (type) => ["SUBTV","SUBTN","VHH","VHF","VHB","SUBTVF","SUBTNF","VHM","TOTAL"].includes(type);
+
+    body = `
+      <table>
+        <thead><tr><th style="width:48px">Riad.</th><th>Položka</th><th style="width:120px;text-align:right">Suma (€)</th></tr></thead>
+        <tbody>
+          ${vzsComputed.map(r => {
+            const cls = rowClass(r.type);
+            const ind = isSection(r.type) ? "" : "indent1";
+            const showZero = isSection(r.type);
+            return `<tr class="${cls}"><td>${isSection(r.type) ? "" : r.id}</td><td class="${ind}">${r.label}</td><td class="num">${r.val !== 0 || showZero ? fmtNum(Math.abs(r.val)) : "—"}</td></tr>`;
+          }).join("")}
+        </tbody>
+      </table>`;
+  }
+
+  const w = window.open("", "_blank");
+  if (!w) return;
+  w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${title}</title><style>${css}</style></head><body>
+    <h1>${title}</h1>
+    <h2>${companyName}</h2>
+    ${body}
+  </body></html>`);
+  w.document.close();
+  w.focus();
+  setTimeout(() => w.print(), 500);
+}
+
+
+
+function App() {
+  const [data, setData] = useState({});
+  const [year, setYear] = useState(String(new Date().getFullYear()));
+  const [tab, setTab] = useState("dennik");
+  const [modal, setModal] = useState(null);
+  const [loaded, setLoaded] = useState(false);
+
+  const [form, setForm] = useState({ date: today(), description: "", debitAcc: "", creditAcc: "", amount: "" });
+  const [importText, setImportText] = useState("");
+  const [newYearVal, setNewYearVal] = useState("");
+  const [openingAcc, setOpeningAcc] = useState({ code: "", debit: "", credit: "" });
+  const [filterAcc, setFilterAcc] = useState("");
+
+  useEffect(() => {
+    (async () => {
+      // SEED_DATA is in import format {year, entries, openingBalances}
+      // App stores data as { "2024": {entries, openingBalances}, ... }
+      const seedFormatted = {
+        [SEED_DATA.year]: {
+          entries: SEED_DATA.entries ?? [],
+          openingBalances: SEED_DATA.openingBalances ?? {}
+        }
+      };
+      let loaded = false;
+      try {
+        const _raw = localStorage.getItem(STORAGE_KEY); const r = _raw ? { value: _raw } : null;
+        if (r?.value) {
+          const parsed = JSON.parse(r.value);
+          // Check it's in the correct format (has year keys with entries arrays)
+          const hasData = Object.values(parsed).some(v => v?.entries?.length > 0);
+          if (hasData) {
+            setData(parsed);
+            loaded = true;
+          }
+        }
+      } catch (_) {}
+      if (!loaded) {
+        setData(seedFormatted);
+        try { localStorage.setItem(STORAGE_KEY, JSON.stringify(seedFormatted)); } catch (_) {}
+      }
+      setLoaded(true);
+    })();
+  }, []);
+
+  // Auto-select most recent year when data loads
+  useEffect(() => {
+    const years = Object.keys(data).sort();
+    if (years.length > 0) {
+      setYear(prev => years.includes(prev) ? prev : years[years.length - 1]);
+    }
+  }, [data]);
+
+    const save = useCallback(async (d) => {
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(d)); } catch (_) {}
+  }, []);
+
+  const setDataAndSave = (fn) => {
+    setData(prev => {
+      const next = typeof fn === "function" ? fn(prev) : fn;
+      save(next);
+      return next;
+    });
+  };
+
+  if (!loaded) return (
+    <div style={{ background: "#0b0f1a", height: "100vh", display: "flex", alignItems: "center", justifyContent: "center", color: "#6b7280", fontFamily: "'IBM Plex Mono', monospace" }}>
+      Načítavam dáta…
+    </div>
+  );
+
+  const yearData = data[year] ?? emptyYear();
+  const ledger = calcLedger(yearData.entries, yearData.openingBalances);
+  const years = Object.keys(data).sort();
+
+  const addEntry = () => {
+    if (!form.date || !form.description || !form.debitAcc || !form.creditAcc || !form.amount) return;
+    const entry = { id: Date.now(), ...form, amount: parseFloat(form.amount) };
+    setDataAndSave(prev => ({
+      ...prev,
+      [year]: { ...(prev[year] ?? emptyYear()), entries: [...(prev[year]?.entries ?? []), entry] }
+    }));
+    setForm(f => ({ ...f, description: "", debitAcc: "", creditAcc: "", amount: "" }));
+    setModal(null);
+  };
+
+  const deleteEntry = (id) => {
+    setDataAndSave(prev => ({
+      ...prev,
+      [year]: { ...(prev[year] ?? emptyYear()), entries: (prev[year]?.entries ?? []).filter(e => e.id !== id) }
+    }));
+  };
+
+  const createYear = () => {
+    if (!newYearVal || data[newYearVal]) return;
+    setDataAndSave(prev => ({ ...prev, [newYearVal]: emptyYear() }));
+    setYear(newYearVal);
+    setNewYearVal("");
+    setModal(null);
+  };
+
+  const saveOpening = () => {
+    if (!openingAcc.code) return;
+    setDataAndSave(prev => ({
+      ...prev,
+      [year]: {
+        ...(prev[year] ?? emptyYear()),
+        openingBalances: {
+          ...(prev[year]?.openingBalances ?? {}),
+          [openingAcc.code]: { debit: parseFloat(openingAcc.debit) || 0, credit: parseFloat(openingAcc.credit) || 0 }
+        }
+      }
+    }));
+    setOpeningAcc({ code: "", debit: "", credit: "" });
+    setModal(null);
+  };
+
+  const doImport = () => {
+    try {
+      const imp = JSON.parse(importText);
+      const y = imp.year ?? newYearVal;
+      if (!y) return alert("JSON musí obsahovať pole 'year'.");
+      setDataAndSave(prev => ({ ...prev, [y]: { entries: imp.entries ?? [], openingBalances: imp.openingBalances ?? {} } }));
+      setYear(y);
+      setImportText("");
+      setModal(null);
+    } catch { alert("Neplatný JSON formát."); }
+  };
+
+  const handleAiImport = (targetYear, entries) => {
+    setDataAndSave(prev => {
+      const existing = prev[targetYear] ?? emptyYear();
+      return { ...prev, [targetYear]: { ...existing, entries: [...existing.entries, ...entries] } };
+    });
+    setYear(targetYear);
+    setModal(null);
+  };
+
+  const totalDebit = yearData.entries.reduce((s, e) => s + e.amount, 0);
+  // Exclude závierka closing entries for all reports — they zero out accounts
+  const prevadzkovéEntries = yearData.entries.filter(e => !e.description?.startsWith("Závierka"));
+  const ledgerBez = calcLedger(prevadzkovéEntries, yearData.openingBalances);
+  const aktiva = Object.values(ledgerBez).filter(a => a.type === "A");
+  const pasiva = Object.values(ledgerBez).filter(a => a.type === "P");
+  const naklady = Object.values(ledgerBez).filter(a => a.type === "N");
+  const vynosy = Object.values(ledgerBez).filter(a => a.type === "V");
+  const sumBal = (arr) => arr.reduce((s, a) => s + balance(a), 0);
+  const vhp = sumBal(vynosy) - sumBal(naklady);
+  const filteredEntries = filterAcc
+    ? yearData.entries.filter(e => e.debitAcc === filterAcc || e.creditAcc === filterAcc)
+    : yearData.entries;
+
+  const inp = {
+    background: "#1f2937", border: "1px solid #374151", borderRadius: 8,
+    color: "#f9fafb", padding: "8px 12px", fontSize: 14, width: "100%",
+    fontFamily: "'IBM Plex Mono', monospace", outline: "none"
+  };
+  const btn = (color = "#10b981") => ({
+    background: color, border: "none", borderRadius: 8, color: "#fff",
+    padding: "8px 18px", cursor: "pointer", fontFamily: "'IBM Plex Mono', monospace",
+    fontSize: 13, fontWeight: 600, letterSpacing: 0.5, transition: "opacity .15s"
+  });
+  const th = { color: "#9ca3af", fontSize: 11, letterSpacing: 1, textTransform: "uppercase", padding: "8px 12px", borderBottom: "1px solid #1f2937", textAlign: "left" };
+  const td = { padding: "9px 12px", fontSize: 13, color: "#e5e7eb", borderBottom: "1px solid #111827" };
+
+  const TABS = [
+    { id: "dennik", label: "📋 Denník" },
+    { id: "kniha", label: "📚 Hlavná kniha" },
+    { id: "suvaha", label: "⚖️ Súvaha" },
+    { id: "vysledovka", label: "📊 Výsledovka" },
+    { id: "zahajovacia", label: "🔢 Otváracie zostatky" },
+  ];
+
+  return (
+    <div style={{ minHeight: "100vh", background: "#0b0f1a", fontFamily: "'IBM Plex Mono', monospace", color: "#f9fafb" }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700&family=IBM+Plex+Mono:wght@400;600&display=swap');
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        select option { background: #1f2937; }
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: #0d1117; }
+        ::-webkit-scrollbar-thumb { background: #374151; border-radius: 3px; }
+        tbody tr:hover td { background: #161d2e !important; }
+        button:hover { opacity: .82; }
+        input[type=checkbox] { accent-color: #10b981; }
+      `}</style>
+
+      {/* Header */}
+      <div style={{ borderBottom: "1px solid #1f2937", padding: "0 24px", display: "flex", alignItems: "center", justifyContent: "space-between", minHeight: 60, background: "#0d1117", flexWrap: "wrap", gap: 8, paddingTop: 8, paddingBottom: 8 }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+          <span style={{ fontFamily: "'Playfair Display',serif", fontSize: 20, color: "#f9fafb", letterSpacing: 0.5 }}>⊞ Podvojné účtovníctvo</span>
+          <span style={{ color: "#374151" }}>|</span>
+          <select value={year} onChange={e => setYear(e.target.value)} style={{ ...inp, width: "auto", padding: "5px 10px", fontSize: 14 }}>
+            {years.length === 0 && <option value={year}>{year}</option>}
+            {years.map(y => <option key={y} value={y}>{y}</option>)}
+          </select>
+          <button onClick={() => setModal("newYear")} style={{ ...btn("#6366f1"), padding: "5px 12px", fontSize: 12 }}>+ Rok</button>
+        </div>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          <button onClick={() => setModal("importPdf")} style={{ ...btn("#f59e0b"), fontSize: 12, padding: "6px 14px" }}>📄 PDF import</button>
+          <button onClick={() => setModal("importXml")} style={{ ...btn("#6366f1"), fontSize: 12, padding: "6px 14px" }}>🏦 XML výpis</button>
+          <button onClick={() => setModal("importJson")} style={{ ...btn("#374151"), fontSize: 12, padding: "6px 14px" }}>⬆ JSON</button>
+          <button onClick={() => {
+            const exp = JSON.stringify({ year, ...yearData }, null, 2);
+            const a = document.createElement("a"); a.href = "data:text/json," + encodeURIComponent(exp);
+            a.download = `uctovnictvo-${year}.json`; a.click();
+          }} style={{ ...btn("#374151"), fontSize: 12, padding: "6px 14px" }}>⬇ Export</button>
+          <button onClick={() => setModal("ocr")} style={{ ...btn("#7c3aed"), fontSize: 12, padding: "6px 14px" }}>📷 OCR doklad</button>
+          <button onClick={() => setModal("entry")} style={{ ...btn("#10b981"), fontSize: 12, padding: "6px 14px" }}>+ Zápis</button>
+        </div>
+      </div>
+
+      {/* Summary bar */}
+      <div style={{ display: "flex", gap: 1, background: "#1f2937" }}>
+        {[
+          { label: "Záznamy", val: yearData.entries.length, unit: "ks" },
+          { label: "Obrat MD", val: fmt(totalDebit), unit: "€" },
+          { label: "Aktíva", val: fmt(sumBal(aktiva)), unit: "€" },
+          { label: "Pasíva", val: fmt(sumBal(pasiva)), unit: "€" },
+          { label: "Výsledok hosp.", val: fmt(vhp), unit: "€", accent: vhp >= 0 ? "#4ade80" : "#f87171" },
+        ].map(s => (
+          <div key={s.label} style={{ flex: 1, padding: "10px 12px", background: "#0d1117", textAlign: "center" }}>
+            <div style={{ fontSize: 10, color: "#6b7280", letterSpacing: 1, textTransform: "uppercase" }}>{s.label}</div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: s.accent ?? "#f9fafb", marginTop: 3 }}>{s.val} {s.unit}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Tabs */}
+      <div style={{ display: "flex", padding: "0 20px", borderBottom: "1px solid #1f2937", background: "#0d1117", overflowX: "auto" }}>
+        {TABS.map(t => (
+          <button key={t.id} onClick={() => setTab(t.id)} style={{
+            background: "transparent", border: "none",
+            borderBottom: tab === t.id ? "2px solid #10b981" : "2px solid transparent",
+            color: tab === t.id ? "#f9fafb" : "#6b7280",
+            padding: "13px 18px", cursor: "pointer", fontSize: 13,
+            fontFamily: "'IBM Plex Mono', monospace", transition: "color .15s", whiteSpace: "nowrap"
+          }}>{t.label}</button>
+        ))}
+      </div>
+
+      {/* Content */}
+      <div style={{ padding: 24 }}>
+
+        {/* DENNIK */}
+        {tab === "dennik" && (
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16, flexWrap: "wrap", gap: 10 }}>
+              <span style={{ fontFamily: "'Playfair Display',serif", fontSize: 18 }}>Účtovný denník — {year}</span>
+              <select value={filterAcc} onChange={e => setFilterAcc(e.target.value)} style={{ ...inp, width: 280 }}>
+                <option value="">Všetky účty</option>
+                {ACCOUNT_CHART.map(a => <option key={a.code} value={a.code}>{a.code} – {a.name}</option>)}
+              </select>
+            </div>
+            <div style={{ borderRadius: 12, overflow: "hidden", border: "1px solid #1f2937" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead style={{ background: "#0d1117" }}>
+                  <tr>{["Dátum","Popis","MD účet","D účet","Suma (€)",""].map(h => <th key={h} style={th}>{h}</th>)}</tr>
+                </thead>
+                <tbody>
+                  {filteredEntries.length === 0 && (
+                    <tr><td colSpan={6} style={{ ...td, textAlign: "center", color: "#4b5563", padding: "50px 20px" }}>
+                      <div style={{ fontSize: 32, marginBottom: 12 }}>📭</div>
+                      <div>Žiadne záznamy. Použite <strong style={{ color: "#f59e0b" }}>📄 PDF import</strong>, <strong style={{ color: "#6366f1" }}>🏦 XML výpis</strong> alebo <strong style={{ color: "#10b981" }}>+ Zápis</strong>.</div>
+                    </td></tr>
+                  )}
+                  {[...filteredEntries].reverse().map(e => (
+                    <tr key={e.id}>
+                      <td style={{ ...td, color: "#9ca3af" }}>{e.date}</td>
+                      <td style={{ ...td, maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.description}</td>
+                      <td style={{ ...td, color: "#4ade80" }}>{e.debitAcc} <span style={{ color: "#374151" }}>({ledger[e.debitAcc]?.name ?? "?"})</span></td>
+                      <td style={{ ...td, color: "#f472b6" }}>{e.creditAcc} <span style={{ color: "#374151" }}>({ledger[e.creditAcc]?.name ?? "?"})</span></td>
+                      <td style={{ ...td, textAlign: "right", fontWeight: 700, color: "#10b981", whiteSpace: "nowrap" }}>{fmt(e.amount)}</td>
+                      <td style={td}><button onClick={() => deleteEntry(e.id)} style={{ background: "none", border: "none", color: "#ef4444", cursor: "pointer", fontSize: 18, lineHeight: 1, padding: "0 4px" }}>×</button></td>
+                    </tr>
+                  ))}
+                </tbody>
+                {filteredEntries.length > 0 && (
+                  <tfoot style={{ background: "#0d1117" }}>
+                    <tr>
+                      <td colSpan={4} style={{ ...td, color: "#6b7280", textAlign: "right" }}>CELKOM</td>
+                      <td style={{ ...td, textAlign: "right", fontWeight: 700, color: "#10b981" }}>{fmt(filteredEntries.reduce((s, e) => s + e.amount, 0))}</td>
+                      <td style={td}></td>
+                    </tr>
+                  </tfoot>
+                )}
+              </table>
+            </div>
+          </div>
+        )}
+
+        {/* HLAVNA KNIHA */}
+        {tab === "kniha" && (
+          <div>
+            <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 18, marginBottom: 16 }}>Hlavná kniha — {year}</div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 14 }}>
+              {Object.values(ledger).filter(a => a.debit !== 0 || a.credit !== 0).map(acc => {
+                const bal = balance(acc);
+                return (
+                  <div key={acc.code} style={{ background: "#0d1117", border: "1px solid #1f2937", borderRadius: 12, padding: 16, borderTop: `3px solid ${typeColor[acc.type]}` }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
+                      <div>
+                        <div style={{ fontSize: 20, fontFamily: "'Playfair Display',serif", color: typeColor[acc.type] }}>{acc.code}</div>
+                        <div style={{ fontSize: 12, color: "#9ca3af", marginTop: 2 }}>{acc.name}</div>
+                      </div>
+                      <Tag type={acc.type} />
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6 }}>
+                      {[{ l: "MD", v: fmt(acc.debit), c: "#4ade80" }, { l: "D", v: fmt(acc.credit), c: "#f472b6" }, { l: "Zostatok", v: fmt(Math.abs(bal)), c: bal >= 0 ? "#60a5fa" : "#f87171" }].map(x => (
+                        <div key={x.l} style={{ textAlign: "center", background: "#1f2937", borderRadius: 6, padding: "6px 4px" }}>
+                          <div style={{ color: "#6b7280", fontSize: 10, letterSpacing: 0.5 }}>{x.l}</div>
+                          <div style={{ color: x.c, fontWeight: 700, marginTop: 2, fontSize: 12 }}>{x.v}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+              {Object.values(ledger).filter(a => a.debit !== 0 || a.credit !== 0).length === 0 && (
+                <div style={{ color: "#4b5563", textAlign: "center", padding: 50, gridColumn: "1/-1" }}>Žiadne záznamy</div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* ── SÚVAHA ──────────────────────────────────────────────────── */}
+        {tab === "suvaha" && (() => {
+          const rowsA = buildSuvahaRows(SA_ROWS, ledgerBez, vhp);
+          const rowsP = buildSuvahaRows(SP_ROWS, ledgerBez, vhp);
+          const totalA = rowsA.filter(r => r.lv === 0).reduce((s, r) => s + r.val, 0);
+          const totalP = rowsP.filter(r => r.lv === 0).reduce((s, r) => s + r.val, 0);
+          const diff = Math.abs(totalA - totalP);
+          const company = "COFIM, s.r.o.";
+
+          const SRow = ({ row, color }) => {
+            const indent = row.lv === 0 ? 10 : row.lv === 1 ? 26 : 42;
+            const bg     = row.lv === 0 ? "#0a0f1e" : row.lv === 1 ? "#0d1422" : "transparent";
+            const fw     = row.lv < 2 ? 700 : 400;
+            const fs     = row.lv === 0 ? 13 : 12;
+            const showVal = row.val !== 0 || row.lv === 0;
+            return (
+              <tr style={{ background: bg, borderTop: row.lv === 0 ? "1px solid #1f2937" : "none" }}>
+                <td style={{ ...td, color: "#4b5563", fontSize: 10, width: 58, whiteSpace: "nowrap" }}>{row.id}</td>
+                <td style={{ ...td, paddingLeft: indent, fontWeight: fw, fontSize: fs }}>{row.label}</td>
+                <td style={{ ...td, textAlign: "right", fontWeight: fw, fontSize: fs,
+                  color: !showVal ? "#374151" : row.val < 0 ? "#f87171" : row.lv === 0 ? color : "#e5e7eb",
+                  fontFamily: "'IBM Plex Mono',monospace" }}>
+                  {showVal ? fmt(row.val) : "—"}
+                </td>
+              </tr>
+            );
+          };
+
+          const SideTable = ({ rows, label, color }) => (
+            <div style={{ background: "#0d1117", border: `1px solid ${color}33`, borderRadius: 10, overflow: "hidden" }}>
+              <div style={{ padding: "9px 14px", background: color + "15", borderBottom: `1px solid ${color}33`,
+                fontFamily: "'Playfair Display',serif", color, letterSpacing: 2, fontSize: 13 }}>
+                {label}
+              </div>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead style={{ background: "#070b12" }}>
+                  <tr>
+                    <th style={{ ...th, width: 58 }}>Riadok</th>
+                    <th style={th}>Položka</th>
+                    <th style={{ ...th, textAlign: "right", width: 130 }}>Suma (€)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map(r => <SRow key={r.id} row={r} color={color} />)}
+                </tbody>
+                <tfoot>
+                  <tr style={{ background: color + "22", borderTop: `2px solid ${color}66` }}>
+                    <td colSpan={2} style={{ ...td, color, fontWeight: 700, textTransform: "uppercase", fontSize: 11, letterSpacing: 1 }}>{label} SPOLU</td>
+                    <td style={{ ...td, textAlign: "right", color, fontWeight: 700, fontSize: 16, fontFamily: "'IBM Plex Mono',monospace" }}>{fmt(label === "AKTÍVA" ? totalA : totalP)}</td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          );
+
+          return (
+            <div>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, flexWrap: "wrap", gap: 8 }}>
+                <span style={{ fontFamily: "'Playfair Display',serif", fontSize: 18 }}>Súvaha — {year}</span>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button onClick={() => printVykaz("suvaha", year, company, rowsA, rowsP, null)}
+                    style={btn("#374151")}>🖨 Tlač / PDF</button>
+                  <button onClick={() => exportExcel(rowsA, rowsP, buildVzsRows(ledgerBez), year, company)}
+                    style={btn("#14532d")}>📊 Export Excel</button>
+                </div>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+                <SideTable rows={rowsA} label="AKTÍVA" color="#4ade80" />
+                <SideTable rows={rowsP} label="PASÍVA" color="#f472b6" />
+              </div>
+              <div style={{ marginTop: 12, padding: 13, background: "#0d1117", border: "1px solid #1f2937",
+                borderRadius: 10, display: "flex", justifyContent: "center", gap: 28, flexWrap: "wrap", fontSize: 13 }}>
+                <span style={{ color: "#6b7280" }}>Aktíva: <strong style={{ color: "#4ade80" }}>{fmt(totalA)} €</strong></span>
+                <span style={{ color: "#6b7280" }}>Pasíva: <strong style={{ color: "#f472b6" }}>{fmt(totalP)} €</strong></span>
+                <span style={{ fontWeight: 700, color: diff < 0.01 ? "#10b981" : "#f87171" }}>
+                  {diff < 0.01 ? "✓ Bilancia súhlasí" : `⚠ Rozdiel: ${fmt(diff)} €`}
+                </span>
+              </div>
+            </div>
+          );
+        })()}
+
+        {/* ── VÝKAZ ZISKOV A STRÁT ────────────────────────────────────── */}
+        {tab === "vysledovka" && (() => {
+          const vzsRows = buildVzsRows(ledgerBez);
+          const company = "COFIM, s.r.o.";
+
+          const sectionTypes = new Set(["SUBTV","SUBTN","VHH","VHF","VHB","SUBTVF","SUBTNF","VHM","TOTAL","MARZA"]);
+          const isSection = (type) => sectionTypes.has(type);
+
+          const rowBg = (type) => {
+            if (type === "TOTAL") return "#0f2a1a";
+            if (type === "VHH" || type === "VHB") return "#0d2010";
+            if (type === "SUBTV" || type === "SUBTVF") return "#0d1a2e";
+            if (type === "SUBTN" || type === "SUBTNF") return "#1f0d0d";
+            if (type === "VHF" || type === "VHM") return "#111a0d";
+            if (type === "MARZA") return "#0d1117";
+            return "transparent";
+          };
+          const rowColor = (type, val) => {
+            if (type === "TOTAL" || type === "VHH" || type === "VHB" || type === "VHF" || type === "VHM")
+              return val >= 0 ? "#10b981" : "#ef4444";
+            if (type === "SUBTV" || type === "SUBTVF") return "#60a5fa";
+            if (type === "SUBTN" || type === "SUBTNF") return "#f87171";
+            if (type === "MARZA") return "#a3e635";
+            if (type === "V" || type === "VF" || type === "VM") return "#93c5fd";
+            return "#e5e7eb";
+          };
+
+          return (
+            <div>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14, flexWrap: "wrap", gap: 8 }}>
+                <span style={{ fontFamily: "'Playfair Display',serif", fontSize: 18 }}>Výkaz ziskov a strát — {year}</span>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button onClick={() => printVykaz("vzs", year, company, null, null, vzsRows)}
+                    style={btn("#374151")}>🖨 Tlač / PDF</button>
+                  <button onClick={() => exportExcel(buildSuvahaRows(SA_ROWS, ledgerBez, vhp), buildSuvahaRows(SP_ROWS, ledgerBez, vhp), vzsRows, year, company)}
+                    style={btn("#14532d")}>📊 Export Excel</button>
+                </div>
+              </div>
+              <div style={{ background: "#0d1117", border: "1px solid #1f2937", borderRadius: 12, overflow: "hidden" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                  <thead style={{ background: "#070b12" }}>
+                    <tr>
+                      <th style={{ ...th, width: 48 }}>Riad.</th>
+                      <th style={th}>Položka výkazu</th>
+                      <th style={{ ...th, textAlign: "right", width: 140 }}>Suma (€)</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {vzsRows.map(row => {
+                      const sec = isSection(row.type);
+                      const borderT = sec ? "1px solid #1f2937" : "none";
+                      const fs = sec ? 13 : 12;
+                      const fw = sec ? 700 : 400;
+                      const indent = sec ? 10 : 26;
+                      const color = rowColor(row.type, row.val);
+                      const showVal = row.val !== 0 || sec;
+                      return (
+                        <tr key={row.id} style={{ background: rowBg(row.type), borderTop: borderT }}>
+                          <td style={{ ...td, color: "#4b5563", fontSize: 10 }}>{sec ? "" : row.id}</td>
+                          <td style={{ ...td, fontWeight: fw, fontSize: fs, paddingLeft: indent }}>{row.label}</td>
+                          <td style={{ ...td, textAlign: "right", fontWeight: fw, fontSize: sec ? 14 : 12,
+                            color, fontFamily: "'IBM Plex Mono',monospace" }}>
+                            {showVal ? fmt(row.val) : "—"}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          );
+        })()}
+
+
+        
+        {tab === "zahajovacia" && (
+          <div>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+              <span style={{ fontFamily: "'Playfair Display',serif", fontSize: 18 }}>Otváracie zostatky — {year}</span>
+              <button onClick={() => setModal("opening")} style={btn("#6366f1")}>+ Pridať zostatok</button>
+            </div>
+            <div style={{ borderRadius: 12, overflow: "hidden", border: "1px solid #1f2937" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse" }}>
+                <thead style={{ background: "#0d1117" }}>
+                  <tr>{["Účet","Názov","Typ","MD (€)","D (€)","Zostatok (€)"].map(h => <th key={h} style={th}>{h}</th>)}</tr>
+                </thead>
+                <tbody>
+                  {Object.entries(yearData.openingBalances ?? {}).map(([code, v]) => {
+                    const acc = ACCOUNT_CHART.find(a => a.code === code);
+                    const bal = (acc?.type === "A" || acc?.type === "N") ? v.debit - v.credit : v.credit - v.debit;
+                    return (
+                      <tr key={code}>
+                        <td style={{ ...td, color: "#9ca3af" }}>{code}</td>
+                        <td style={td}>{acc?.name ?? "—"}</td>
+                        <td style={td}>{acc && <Tag type={acc.type} />}</td>
+                        <td style={{ ...td, textAlign: "right", color: "#4ade80" }}>{fmt(v.debit)}</td>
+                        <td style={{ ...td, textAlign: "right", color: "#f472b6" }}>{fmt(v.credit)}</td>
+                        <td style={{ ...td, textAlign: "right", fontWeight: 700, color: "#60a5fa" }}>{fmt(bal)}</td>
+                      </tr>
+                    );
+                  })}
+                  {Object.keys(yearData.openingBalances ?? {}).length === 0 && (
+                    <tr><td colSpan={6} style={{ ...td, color: "#4b5563", textAlign: "center", padding: 40 }}>Žiadne otváracie zostatky</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* ── AI IMPORT MODALS ── */}
+      {modal === "importPdf" && <PdfImportModal onClose={() => setModal(null)} onImport={handleAiImport} inp={inp} btn={btn} />}
+      {modal === "importXml" && <XmlImportModal onClose={() => setModal(null)} onImport={handleAiImport} inp={inp} btn={btn} />}
+
+      {/* ── STANDARD MODALS ── */}
+      {modal === "entry" && (
+        <Modal title="Nový účtovný zápis" onClose={() => setModal(null)}>
+          {[{ label: "Dátum", key: "date", type: "date" }, { label: "Popis", key: "description", type: "text", placeholder: "Popis operácie" }].map(f => (
+            <div key={f.key} style={{ marginBottom: 14 }}>
+              <label style={{ display: "block", fontSize: 11, color: "#9ca3af", marginBottom: 4, letterSpacing: 1, textTransform: "uppercase" }}>{f.label}</label>
+              <input type={f.type} value={form[f.key]} placeholder={f.placeholder} onChange={e => setForm(x => ({ ...x, [f.key]: e.target.value }))} style={inp} />
+            </div>
+          ))}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 14 }}>
+            {[{ label: "MD účet", key: "debitAcc", color: "#4ade80" }, { label: "D účet", key: "creditAcc", color: "#f472b6" }].map(f => (
+              <div key={f.key}>
+                <label style={{ display: "block", fontSize: 11, color: f.color, marginBottom: 4, letterSpacing: 1, textTransform: "uppercase" }}>{f.label}</label>
+                <select value={form[f.key]} onChange={e => setForm(x => ({ ...x, [f.key]: e.target.value }))} style={inp}>
+                  <option value="">— vybrať —</option>
+                  {ACCOUNT_CHART.map(a => <option key={a.code} value={a.code}>{a.code} – {a.name}</option>)}
+                </select>
+              </div>
+            ))}
+          </div>
+          <div style={{ marginBottom: 20 }}>
+            <label style={{ display: "block", fontSize: 11, color: "#9ca3af", marginBottom: 4, letterSpacing: 1, textTransform: "uppercase" }}>Suma (€)</label>
+            <input type="number" value={form.amount} placeholder="0.00" onChange={e => setForm(x => ({ ...x, amount: e.target.value }))} style={inp} />
+          </div>
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
+            <button onClick={() => setModal(null)} style={btn("#374151")}>Zrušiť</button>
+            <button onClick={addEntry} style={btn()}>Uložiť zápis</button>
+          </div>
+        </Modal>
+      )}
+
+      {modal === "newYear" && (
+        <Modal title="Nový účtovný rok" onClose={() => setModal(null)}>
+          <div style={{ marginBottom: 20 }}>
+            <label style={{ display: "block", fontSize: 11, color: "#9ca3af", marginBottom: 4, letterSpacing: 1, textTransform: "uppercase" }}>Rok</label>
+            <input type="number" value={newYearVal} placeholder="napr. 2025" onChange={e => setNewYearVal(e.target.value)} style={inp} />
+          </div>
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
+            <button onClick={() => setModal(null)} style={btn("#374151")}>Zrušiť</button>
+            <button onClick={createYear} style={btn("#6366f1")}>Vytvoriť rok</button>
+          </div>
+        </Modal>
+      )}
+
+      {modal === "opening" && (
+        <Modal title="Otváracie zostatky" onClose={() => setModal(null)}>
+          <div style={{ marginBottom: 14 }}>
+            <label style={{ display: "block", fontSize: 11, color: "#9ca3af", marginBottom: 4, letterSpacing: 1, textTransform: "uppercase" }}>Účet</label>
+            <select value={openingAcc.code} onChange={e => setOpeningAcc(x => ({ ...x, code: e.target.value }))} style={inp}>
+              <option value="">— vybrať —</option>
+              {ACCOUNT_CHART.map(a => <option key={a.code} value={a.code}>{a.code} – {a.name}</option>)}
+            </select>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 20 }}>
+            {[{ label: "MD zostatok (€)", key: "debit", color: "#4ade80" }, { label: "D zostatok (€)", key: "credit", color: "#f472b6" }].map(f => (
+              <div key={f.key}>
+                <label style={{ display: "block", fontSize: 11, color: f.color, marginBottom: 4, letterSpacing: 1, textTransform: "uppercase" }}>{f.label}</label>
+                <input type="number" value={openingAcc[f.key]} placeholder="0.00" onChange={e => setOpeningAcc(x => ({ ...x, [f.key]: e.target.value }))} style={inp} />
+              </div>
+            ))}
+          </div>
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
+            <button onClick={() => setModal(null)} style={btn("#374151")}>Zrušiť</button>
+            <button onClick={saveOpening} style={btn("#6366f1")}>Uložiť zostatok</button>
+          </div>
+        </Modal>
+      )}
+
+      {modal === "ocr" && (
+        <OcrModal
+          onClose={() => setModal(null)}
+          onConfirm={(entry) => {
+            setForm(entry);
+            setModal("entry");
+          }}
+          inp={inp}
+          btn={btn}
+          year={year}
+        />
+      )}
+
+      {modal === "importJson" && (
+        <Modal title="Import (JSON)" onClose={() => setModal(null)}>
+          <div style={{ marginBottom: 10, fontSize: 12, color: "#9ca3af" }}>
+            Formát: <code style={{ color: "#60a5fa", fontSize: 11 }}>{`{ "year": "2023", "entries": [...], "openingBalances": {...} }`}</code>
+          </div>
+          <textarea value={importText} onChange={e => setImportText(e.target.value)}
+            rows={10} placeholder='{ "year": "2023", "entries": [], "openingBalances": {} }'
+            style={{ ...inp, resize: "vertical", marginBottom: 16, fontSize: 12 }} />
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
+            <button onClick={() => setModal(null)} style={btn("#374151")}>Zrušiť</button>
+            <button onClick={doImport} style={btn("#f59e0b")}>⬆ Importovať</button>
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}function loadSheetJS(cb) {
+  if (window.XLSX) { cb(window.XLSX); return; }
+  const s = document.createElement("script");
+  s.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
+  s.onload = () => cb(window.XLSX);
+  s.onerror = () => alert("Nepodarilo sa načítať SheetJS.");
+  document.head.appendChild(s);
+}
+
+function exportToExcel(suvahaRows, vzsRows, year) {
+  loadSheetJS((XLSX) => {
+    const wb = XLSX.utils.book_new();
+    if (suvahaRows.length > 0) {
+      const rows = [
+        ["SÚVAHA k 31.12." + year],
+        ["COFIM, s.r.o., Obrancov mieru 361/12, 01501 Rajec"],
+        [""],
+        ["Riadok", "Položka", "Suma (€)"],
+        ...suvahaRows.map(r => [r.id || "", r.label || "", r.value != null ? +r.value.toFixed(2) : ""])
+      ];
+      const ws = XLSX.utils.aoa_to_sheet(rows);
+      ws["!cols"] = [{wch:8},{wch:50},{wch:18}];
+      XLSX.utils.book_append_sheet(wb, ws, "Súvaha");
+    }
+    if (vzsRows.length > 0) {
+      const rows = [
+        ["VÝKAZ ZISKOV A STRÁT za rok " + year],
+        ["COFIM, s.r.o., Obrancov mieru 361/12, 01501 Rajec"],
+        [""],
+        ["Riadok", "Položka", "Suma (€)"],
+        ...vzsRows.map(r => [r.id || "", r.label || "", r.value != null ? +r.value.toFixed(2) : ""])
+      ];
+      const ws = XLSX.utils.aoa_to_sheet(rows);
+      ws["!cols"] = [{wch:8},{wch:52},{wch:18}];
+      XLSX.utils.book_append_sheet(wb, ws, "VZS");
+    }
+    // base64 data URI — works in sandboxed iframes
+    const b64 = XLSX.write(wb, { bookType: "xlsx", type: "base64" });
+    const uri = "data:application/vnd.openxmlformats-officedocument.spreadsheetml.sheet;base64," + b64;
+    const a = document.createElement("a");
+    a.href = uri;
+    a.download = "COFIM_" + year + "_vykazy.xlsx";
+    a.click();
+  });
+}
+
+function printReport(type, year) {
+  const el = document.getElementById("print-" + type);
+  if (!el) { alert("Element nenájdený: print-" + type); return; }
+  const title = type === "suvaha"
+    ? "S\u00favaha k 31.12." + year
+    : "V\u00fdkaz ziskov a str\u00e1t za rok " + year;
+  const css = [
+    "body{font-family:Arial,sans-serif;font-size:11px;margin:20px;color:#000}",
+    "h2{font-size:13px;font-weight:bold;margin:0 0 3px}",
+    "h4{font-size:10px;font-weight:normal;color:#555;margin:0 0 14px}",
+    "table{width:100%;border-collapse:collapse}",
+    "th{background:#eee;border:1px solid #bbb;padding:4px 7px;font-size:10px;text-align:left}",
+    "td{border:1px solid #ddd;padding:3px 7px;font-size:11px}",
+    ".r{text-align:right;font-family:monospace}",
+    "@page{margin:15mm}@media print{body{margin:0}}"
+  ].join("");
+  const html = "<!DOCTYPE html><html><head><meta charset='utf-8'><title>" + title + "</title>" +
+    "<style>" + css + "</style></head><body>" +
+    "<h2>" + title + "</h2>" +
+    "<h4>COFIM, s.r.o. | O\u010drancov mieru 361/12, 01501 Rajec</h4>" +
+    el.innerHTML + "</body></html>";
+  const encoded = "data:text/html;charset=utf-8," + encodeURIComponent(html);
+  const a = document.createElement("a");
+  a.href = encoded;
+  a.download = (type === "suvaha" ? "Suvaha" : "VZS") + "_" + year + ".html";
+  a.click();
+}
+
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
