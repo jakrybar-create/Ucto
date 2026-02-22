@@ -1742,7 +1742,31 @@ function App() {
 
   const createYear = () => {
     if (!newYearVal || data[newYearVal]) return;
-    setDataAndSave(prev => ({ ...prev, [newYearVal]: emptyYear() }));
+    // Najdi predchadzajuci rok (najblizsí menší ako nový)
+    const prevYear = Object.keys(data)
+      .filter(y => parseInt(y) < parseInt(newYearVal))
+      .sort((a, b) => b - a)[0];
+
+    let openingBalances = {};
+    if (prevYear) {
+      const prevData = data[prevYear];
+      const prevLedger = calcLedger(prevData.entries ?? [], prevData.openingBalances ?? {});
+      // Prenesieme len súvahové účty (A a P) — triedy 0-4
+      // Nákladové (N, trieda 5) a výnosové (V, trieda 6) sa nulujú
+      for (const [code, acc] of Object.entries(prevLedger)) {
+        if (acc.type === "A" || acc.type === "P") {
+          const bal = balance(acc);
+          if (bal !== 0) {
+            // Prevedieme zostatok na správnu stranu
+            openingBalances[code] = acc.type === "A"
+              ? { debit: Math.max(bal, 0), credit: Math.max(-bal, 0) }
+              : { debit: Math.max(-bal, 0), credit: Math.max(bal, 0) };
+          }
+        }
+      }
+    }
+
+    setDataAndSave(prev => ({ ...prev, [newYearVal]: { entries: [], openingBalances } }));
     setYear(newYearVal);
     setNewYearVal("");
     setModal(null);
@@ -2275,18 +2299,33 @@ function App() {
         );
       })()}
 
-      {modal === "newYear" && (
-        <Modal title="Nový účtovný rok" onClose={() => setModal(null)}>
-          <div style={{ marginBottom: 20 }}>
-            <label style={{ display: "block", fontSize: 11, color: "#9ca3af", marginBottom: 4, letterSpacing: 1, textTransform: "uppercase" }}>Rok</label>
-            <input type="number" value={newYearVal} placeholder="napr. 2025" onChange={e => setNewYearVal(e.target.value)} style={inp} />
-          </div>
-          <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
-            <button onClick={() => setModal(null)} style={btn("#374151")}>Zrušiť</button>
-            <button onClick={createYear} style={btn("#6366f1")}>Vytvoriť rok</button>
-          </div>
-        </Modal>
-      )}
+      {modal === "newYear" && (() => {
+        const years = Object.keys(data).sort();
+        const prevYear = years.filter(y => parseInt(y) < parseInt(newYearVal || "0")).sort((a,b) => b-a)[0];
+        return (
+          <Modal title="Nový účtovný rok" onClose={() => setModal(null)}>
+            <div style={{ marginBottom: 16 }}>
+              <label style={{ display: "block", fontSize: 11, color: "#9ca3af", marginBottom: 4, letterSpacing: 1, textTransform: "uppercase" }}>Rok</label>
+              <input type="number" value={newYearVal} placeholder="napr. 2025" onChange={e => setNewYearVal(e.target.value)} style={inp} />
+            </div>
+            {prevYear && newYearVal && parseInt(newYearVal) > parseInt(prevYear) && (
+              <div style={{ marginBottom: 16, padding: "10px 14px", background: "#0d2010", border: "1px solid #166534", borderRadius: 8, fontSize: 12, color: "#4ade80" }}>
+                ✓ Otváracie zostatky sa automaticky prenesú z roku <strong>{prevYear}</strong><br/>
+                <span style={{ color: "#6b7280", fontSize: 11 }}>Súvahové účty (triedy 0–4) • Nákladové a výnosové účty sa vynulujú</span>
+              </div>
+            )}
+            {!prevYear && (
+              <div style={{ marginBottom: 16, padding: "10px 14px", background: "#1a1a2e", border: "1px solid #374151", borderRadius: 8, fontSize: 12, color: "#9ca3af" }}>
+                Prvý rok — otváracie zostatky zadáte ručne cez tlačidlo "Otváracie zostatky"
+              </div>
+            )}
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
+              <button onClick={() => setModal(null)} style={btn("#374151")}>Zrušiť</button>
+              <button onClick={createYear} style={btn("#6366f1")}>Vytvoriť rok</button>
+            </div>
+          </Modal>
+        );
+      })()}
 
       {modal === "opening" && (
         <Modal title="Otváracie zostatky" onClose={() => setModal(null)}>
