@@ -7,16 +7,12 @@
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { background: #0b0f1a; color: #f9fafb; }
-  </style>
+  <style>* { box-sizing: border-box; margin: 0; padding: 0; } body { background: #0b0f1a; color: #f9fafb; }</style>
 </head>
 <body>
   <div id="root"></div>
   <script type="text/babel" data-presets="react">
     const { useState, useEffect, useCallback, useRef } = React;
-
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 const STORAGE_KEY = "podvojne-uctovnictvo-v3";
@@ -1325,7 +1321,7 @@ function App() {
   }, [data]);
 
     const save = useCallback(async (d) => {
-    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(d)); } catch (_) {}
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(d)); } catch {}
   }, []);
 
   const setDataAndSave = (fn) => {
@@ -1347,13 +1343,24 @@ function App() {
   const years = Object.keys(data).sort();
 
   const addEntry = () => {
-    if (!form.date || !form.description || !form.debitAcc || !form.creditAcc || !form.amount) return;
-    const entry = { id: Date.now(), ...form, amount: parseFloat(form.amount) };
-    setDataAndSave(prev => ({
-      ...prev,
-      [year]: { ...(prev[year] ?? emptyYear()), entries: [...(prev[year]?.entries ?? []), entry] }
-    }));
-    setForm(f => ({ ...f, description: "", debitAcc: "", creditAcc: "", amount: "" }));
+    if (!form.date || !form.debitAcc || !form.creditAcc || !form.amount) return;
+    if (form.editId) {
+      setDataAndSave(prev => ({
+        ...prev,
+        [year]: { ...(prev[year] ?? emptyYear()), entries: (prev[year]?.entries ?? []).map(e =>
+          e.id === form.editId
+            ? { id: e.id, date: form.date, description: form.description, debitAcc: form.debitAcc, creditAcc: form.creditAcc, amount: parseFloat(form.amount) }
+            : e
+        )}
+      }));
+    } else {
+      const entry = { id: Date.now(), date: form.date, description: form.description, debitAcc: form.debitAcc, creditAcc: form.creditAcc, amount: parseFloat(form.amount) };
+      setDataAndSave(prev => ({
+        ...prev,
+        [year]: { ...(prev[year] ?? emptyYear()), entries: [...(prev[year]?.entries ?? []), entry] }
+      }));
+    }
+    setForm({ date: today(), description: "", debitAcc: "", creditAcc: "", amount: "" });
     setModal(null);
   };
 
@@ -1362,6 +1369,11 @@ function App() {
       ...prev,
       [year]: { ...(prev[year] ?? emptyYear()), entries: (prev[year]?.entries ?? []).filter(e => e.id !== id) }
     }));
+  };
+
+  const editEntry = (e) => {
+    setForm({ date: e.date, description: e.description, debitAcc: e.debitAcc, creditAcc: e.creditAcc, amount: String(e.amount), editId: e.id });
+    setModal("entry");
   };
 
   const createYear = () => {
@@ -1544,7 +1556,10 @@ function App() {
                       <td style={{ ...td, color: "#4ade80" }}>{e.debitAcc} <span style={{ color: "#374151" }}>({ledger[e.debitAcc]?.name ?? "?"})</span></td>
                       <td style={{ ...td, color: "#f472b6" }}>{e.creditAcc} <span style={{ color: "#374151" }}>({ledger[e.creditAcc]?.name ?? "?"})</span></td>
                       <td style={{ ...td, textAlign: "right", fontWeight: 700, color: "#10b981", whiteSpace: "nowrap" }}>{fmt(e.amount)}</td>
-                      <td style={td}><button onClick={() => deleteEntry(e.id)} style={{ background: "none", border: "none", color: "#ef4444", cursor: "pointer", fontSize: 18, lineHeight: 1, padding: "0 4px" }}>×</button></td>
+                      <td style={{ ...td, whiteSpace: "nowrap" }}>
+                        <button onClick={() => editEntry(e)} style={{ background: "none", border: "none", color: "#6366f1", cursor: "pointer", fontSize: 15, lineHeight: 1, padding: "0 6px" }} title="Upraviť">✏️</button>
+                        <button onClick={() => deleteEntry(e.id)} style={{ background: "none", border: "none", color: "#ef4444", cursor: "pointer", fontSize: 18, lineHeight: 1, padding: "0 4px" }} title="Vymazať">×</button>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -1796,7 +1811,7 @@ function App() {
 
       {/* ── STANDARD MODALS ── */}
       {modal === "entry" && (
-        <Modal title="Nový účtovný zápis" onClose={() => setModal(null)}>
+        <Modal title={form.editId ? "✏️ Upraviť zápis" : "Nový účtovný zápis"} onClose={() => { setForm({ date: today(), description: "", debitAcc: "", creditAcc: "", amount: "" }); setModal(null); }}>
           {[{ label: "Dátum", key: "date", type: "date" }, { label: "Popis", key: "description", type: "text", placeholder: "Popis operácie" }].map(f => (
             <div key={f.key} style={{ marginBottom: 14 }}>
               <label style={{ display: "block", fontSize: 11, color: "#9ca3af", marginBottom: 4, letterSpacing: 1, textTransform: "uppercase" }}>{f.label}</label>
@@ -1820,7 +1835,7 @@ function App() {
           </div>
           <div style={{ display: "flex", justifyContent: "flex-end", gap: 10 }}>
             <button onClick={() => setModal(null)} style={btn("#374151")}>Zrušiť</button>
-            <button onClick={addEntry} style={btn()}>Uložiť zápis</button>
+            <button onClick={addEntry} style={btn(form.editId ? "#6366f1" : "#10b981")}>{form.editId ? "✓ Uložiť zmeny" : "Uložiť zápis"}</button>
           </div>
         </Modal>
       )}
@@ -1964,7 +1979,6 @@ function printReport(type, year) {
   a.download = (type === "suvaha" ? "Suvaha" : "VZS") + "_" + year + ".html";
   a.click();
 }
-
 
     const root = ReactDOM.createRoot(document.getElementById('root'));
     root.render(<App />);
